@@ -4,13 +4,13 @@
 
 use std::time::Duration;
 
-use cuemesh2_media::{Layer, MediaEngine};
+use cuemesh2_media::{Layer, MediaEngine, MediaKind};
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
 
@@ -26,15 +26,20 @@ fn main() -> anyhow::Result<()> {
     let _guard = rt.enter();
 
     let engine = MediaEngine::new()?;
+    let kind = if path.ends_with(".jpg") || path.ends_with(".jpeg") || path.ends_with(".png") {
+        MediaKind::Image
+    } else {
+        MediaKind::Video
+    };
+    engine.load(Layer::A, std::path::Path::new(&path), kind)?;
     engine.set_alpha(Layer::A, 1.0);
-    engine.load(Layer::A, std::path::Path::new(&path))?;
     println!("prerolled OK, playing for {secs}s…");
-    engine.play()?;
+    engine.play(Layer::A)?;
 
     for _ in 0..(secs * 2) {
         std::thread::sleep(Duration::from_millis(500));
-        println!("position: {:?} ms", engine.position_ms());
+        println!("position: {:?} ms", engine.position_ms(Layer::A));
     }
-    engine.stop()?;
+    engine.stop_all();
     Ok(())
 }

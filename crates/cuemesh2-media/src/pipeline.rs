@@ -1,18 +1,33 @@
-//! Two-layer video pipeline. Audio is intentionally unsupported: decoded
-//! audio streams are discarded into a `fakesink` so files with audio tracks
-//! still play, but nothing reaches an audio device.
+//! Two-layer video engine built from three GStreamer pipelines.
 //!
-//! Topology:
+//! A persistent **display pipeline** composites two `intervideosrc` channels
+//! and never stops running; each layer is fed by an independent, disposable
+//! **producer pipeline** that pushes conformed frames into its channel:
 //!
 //! ```text
-//! uridecodebin_a ─► videoconvert ─► videoscale ─┐
-//!                                                ├─► compositor ─► capsfilter(I420) ─► videoconvert ─► video sink
-//! uridecodebin_b ─► videoconvert ─► videoscale ─┘
+//! display (always PLAYING):
+//!   intervideosrc ch=A ! caps ! queue ─┐
+//!                                      ├─ compositor(I420) ! queue ! videoconvert ! sink
+//!   intervideosrc ch=B ! caps ! queue ─┘
+//!
+//! producer, one per loaded layer (video):
+//!   uridecodebin ! videoconvert ! videoscale ! videorate ! caps ! intervideosink ch=X
+//! producer (image):
+//!   uridecodebin ! imagefreeze ! videoconvert ! videoscale ! caps ! intervideosink ch=X
+//! producer (testscreen):
+//!   videotestsrc is-live=1 ! videoconvert ! caps ! intervideosink ch=X
 //! ```
 //!
-//! Each `uridecodebin` emits pads at PREROLL; a `pad-added` handler links
-//! video pads into the layer chain and audio pads into throwaway fakesinks.
-//! Compositor sink pads carry the per-layer `alpha` we drive from Rust.
+//! Why this shape: `compositor` is an aggregator that waits on every linked
+//! pad, so feeding it directly from per-cue decoders means loading, seeking,
+//! or an errored file on one layer can stall the whole output. The
+//! `intervideosrc` elements are live sources that emit the last (or black)
+//! frame on their own, so the display never starves. Producers can preroll,
+//! start, seek, change rate, and die without the operator's output ever
+//! blinking — which is exactly the resilience a live show needs.
+//!
+//! All frames are conformed to one **canvas** (size/framerate) at the
+//! producer tail, because inter channels do not convert formats.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,29 +52,64 @@ pub enum MediaError {
     LinkElements(String),
     #[error("gstreamer state change failed: {0}")]
     StateChange(String),
-    #[error("gstreamer bus message: {0}")]
-    Bus(String),
     #[error("invalid file path: {0}")]
     BadPath(String),
     #[error("gstreamer add-many failed: {0}")]
     AddMany(String),
+    #[error("layer {0:?} has no media loaded")]
+    NoProducer(Layer),
+}
+
+/// What kind of media a producer pipeline decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Video,
+    /// Stills are looped through `imagefreeze` into an endless video stream.
+    Image,
 }
 
 /// Events published on the engine's broadcast channel.
 #[derive(Debug, Clone)]
 pub enum MediaEvent {
-    /// A layer reached end-of-stream.
+    /// A layer's producer reached end-of-stream.
     Eos(Layer),
-    /// A GStreamer error occurred (usually fatal for one pipeline run).
-    Error { source: String, message: String },
-    /// State changed on the overall pipeline.
-    State(gst::State),
+    /// A producer errored (that layer is dead until the next `load`).
+    Error {
+        layer: Layer,
+        source: String,
+        message: String,
+    },
 }
 
-fn other(layer: Layer) -> Layer {
-    match layer {
-        Layer::A => Layer::B,
-        Layer::B => Layer::A,
+/// Output canvas every producer conforms to.
+#[derive(Debug, Clone, Copy)]
+pub struct Canvas {
+    pub width: i32,
+    pub height: i32,
+    pub fps_n: i32,
+    pub fps_d: i32,
+}
+
+impl Default for Canvas {
+    fn default() -> Self {
+        Self {
+            width: 1920,
+            height: 1080,
+            fps_n: 30,
+            fps_d: 1,
+        }
+    }
+}
+
+impl Canvas {
+    fn caps(&self) -> gst::Caps {
+        gst::Caps::builder("video/x-raw")
+            .field("format", "I420")
+            .field("width", self.width)
+            .field("height", self.height)
+            .field("framerate", gst::Fraction::new(self.fps_n, self.fps_d))
+            .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
+            .build()
     }
 }
 
@@ -83,88 +133,116 @@ fn ensure_init() -> Result<(), MediaError> {
     Ok(())
 }
 
-/// Per-layer state that the engine actively touches after construction.
-/// The `uridecodebin`, converters, mixer pads, etc. are owned by the
-/// pipeline via refcount — no need to hold Rust references to them here.
-struct LayerParts {
-    uridecodebin: gst::Element,
+fn channel_name(layer: Layer) -> &'static str {
+    match layer {
+        Layer::A => "cuemesh-layer-a",
+        Layer::B => "cuemesh-layer-b",
+    }
+}
+
+/// A running producer pipeline plus the flag that stops its bus-watch thread.
+struct Producer {
+    pipeline: gst::Pipeline,
+    bus_shutdown: Arc<AtomicBool>,
+}
+
+impl Producer {
+    fn teardown(self) {
+        self.bus_shutdown.store(true, Ordering::SeqCst);
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+struct LayerSlot {
     compositor_pad: gst::Pad,
-    /// Head of the video chain (`videoconvert`). Kept so we can push EOS into
-    /// the chain while the layer has no media — see [`MediaEngine::load`].
-    video_convert: gst::Element,
-    /// True once a URI has been loaded on this layer.
-    has_media: AtomicBool,
+    producer: Mutex<Option<Producer>>,
     /// Handle to the currently running fade task, if any. Aborted on new fade.
     fade: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 struct Inner {
-    pipeline: gst::Pipeline,
-    layer_a: LayerParts,
-    layer_b: LayerParts,
+    display: gst::Pipeline,
+    layer_a: LayerSlot,
+    layer_b: LayerSlot,
+    canvas: Canvas,
     events_tx: broadcast::Sender<MediaEvent>,
 }
 
-/// Two-layer video+audio pipeline. Clone is cheap (Arc-shared).
+/// Two-layer video engine. Clone is cheap (Arc-shared).
 #[derive(Clone)]
 pub struct MediaEngine {
     inner: Arc<Inner>,
 }
 
 impl MediaEngine {
-    /// Build a fresh pipeline. Does not start it.
+    /// Build and start the display pipeline (black output) with the default
+    /// 1080p30 canvas.
     pub fn new() -> Result<Self, MediaError> {
+        Self::with_canvas(Canvas::default())
+    }
+
+    /// Build and start the display pipeline with an explicit canvas.
+    pub fn with_canvas(canvas: Canvas) -> Result<Self, MediaError> {
         ensure_init()?;
 
-        let pipeline = gst::Pipeline::with_name("cuemesh2-pipeline");
+        let display = gst::Pipeline::with_name("cuemesh2-display");
 
-        // Compositor + video sink chain.
         let compositor = make("compositor", Some("comp"))?;
         compositor.set_property_from_str("background", "black");
+        // The intervideosrc inputs are live, which leaves the pipeline with a
+        // near-zero latency budget — frames arrive "late" at the sink after
+        // any real work and get dropped. Budget two frame intervals.
+        let two_frames_ns =
+            2_000_000_000u64 * canvas.fps_d.max(1) as u64 / canvas.fps_n.max(1) as u64;
+        compositor.set_property("latency", two_frames_ns);
+        compositor.set_property("min-upstream-latency", two_frames_ns);
         // Pin the blending format. Left to negotiate freely, compositor can
         // settle on A444_16LE (16-bit 4:4:4 + alpha) and software-convert
-        // every frame, which drops the frame rate to a crawl. I420 blends
-        // cheaply and every sink path accepts it.
+        // every frame, which drops the frame rate to a crawl.
         let comp_caps = make("capsfilter", Some("comp_caps"))?;
         comp_caps.set_property(
             "caps",
-            gst::Caps::builder("video/x-raw")
-                .field("format", "I420")
-                .build(),
+            gst::Caps::builder("video/x-raw").field("format", "I420").build(),
         );
-        let video_out_convert = make("videoconvert", Some("vout_convert"))?;
+        let out_queue = make("queue", Some("out_queue"))?;
+        let out_convert = make("videoconvert", Some("out_convert"))?;
         let video_sink = Self::make_video_sink()?;
 
-        pipeline
-            .add_many([&compositor, &comp_caps, &video_out_convert, &video_sink])
+        display
+            .add_many([&compositor, &comp_caps, &out_queue, &out_convert, &video_sink])
             .map_err(|e| MediaError::AddMany(e.to_string()))?;
-        gst::Element::link_many([&compositor, &comp_caps, &video_out_convert, &video_sink])
+        gst::Element::link_many([&compositor, &comp_caps, &out_queue, &out_convert, &video_sink])
             .map_err(|e| MediaError::LinkElements(e.to_string()))?;
 
-        let layer_a = Self::build_layer(&pipeline, &compositor, Layer::A, 0)?;
-        let layer_b = Self::build_layer(&pipeline, &compositor, Layer::B, 1)?;
+        let layer_a = Self::build_display_input(&display, &compositor, &canvas, Layer::A, 0)?;
+        let layer_b = Self::build_display_input(&display, &compositor, &canvas, Layer::B, 1)?;
 
-        // Default: A visible at full alpha, B hidden.
-        layer_a.compositor_pad.set_property("alpha", 1.0f64);
+        // Default: both layers transparent — output is black until a fade-in.
+        layer_a.compositor_pad.set_property("alpha", 0.0f64);
         layer_b.compositor_pad.set_property("alpha", 0.0f64);
 
         let (events_tx, _rx) = broadcast::channel(64);
         let engine = MediaEngine {
             inner: Arc::new(Inner {
-                pipeline,
+                display,
                 layer_a,
                 layer_b,
+                canvas,
                 events_tx,
             }),
         };
 
-        engine.spawn_bus_watch();
+        engine.spawn_display_bus_watch();
+        engine
+            .inner
+            .display
+            .set_state(gst::State::Playing)
+            .map_err(|e| MediaError::StateChange(format!("display start: {e}")))?;
         Ok(engine)
     }
 
     /// Pick the video sink. `glimagesink` scales/converts on the GPU;
-    /// `autovideosink` (which usually resolves to `xvimagesink` on X11) is
-    /// the fallback where GL isn't available.
+    /// `autovideosink` (usually `xvimagesink` on X11) is the fallback.
     fn make_video_sink() -> Result<gst::Element, MediaError> {
         for factory in ["glimagesink", "autovideosink"] {
             if let Ok(sink) = gst::ElementFactory::make(factory).name("vsink").build() {
@@ -175,56 +253,164 @@ impl MediaEngine {
         Err(MediaError::ElementFactory("no usable video sink".into()))
     }
 
-    fn build_layer(
-        pipeline: &gst::Pipeline,
+    /// One display-side input branch: intervideosrc → caps → queue → comp pad.
+    fn build_display_input(
+        display: &gst::Pipeline,
         compositor: &gst::Element,
+        canvas: &Canvas,
         layer: Layer,
         zorder: u32,
-    ) -> Result<LayerParts, MediaError> {
+    ) -> Result<LayerSlot, MediaError> {
         let suffix = match layer {
             Layer::A => "a",
             Layer::B => "b",
         };
-        let uridecodebin = make("uridecodebin", Some(&format!("src_{suffix}")))?;
-        let video_convert = make("videoconvert", Some(&format!("vconv_{suffix}")))?;
-        let video_scale = make("videoscale", Some(&format!("vscale_{suffix}")))?;
+        let src = make("intervideosrc", Some(&format!("inter_src_{suffix}")))?;
+        src.set_property("channel", channel_name(layer));
+        // Hold the last frame forever when a producer pauses or dies; "black"
+        // is expressed via alpha, never by the channel timing out.
+        src.set_property("timeout", u64::MAX);
 
-        pipeline
-            .add_many([&uridecodebin, &video_convert, &video_scale])
+        let caps = make("capsfilter", Some(&format!("caps_{suffix}")))?;
+        caps.set_property("caps", canvas.caps());
+        let queue = make("queue", Some(&format!("queue_{suffix}")))?;
+
+        display
+            .add_many([&src, &caps, &queue])
             .map_err(|e| MediaError::AddMany(e.to_string()))?;
-
-        gst::Element::link_many([&video_convert, &video_scale])
+        gst::Element::link_many([&src, &caps, &queue])
             .map_err(|e| MediaError::LinkElements(e.to_string()))?;
 
-        // Request a compositor sink pad and link the chain tail to it.
         let compositor_pad = compositor
             .request_pad_simple("sink_%u")
             .ok_or_else(|| MediaError::LinkElements("compositor sink pad request failed".into()))?;
         compositor_pad.set_property("zorder", zorder);
-        compositor_pad.set_property("alpha", 0.0f64);
 
-        let video_scale_src = video_scale
+        let queue_src = queue
             .static_pad("src")
-            .ok_or_else(|| MediaError::LinkElements("videoscale src pad missing".into()))?;
-        video_scale_src.link(&compositor_pad)?;
+            .ok_or_else(|| MediaError::LinkElements("queue src pad missing".into()))?;
+        queue_src.link(&compositor_pad)?;
 
-        // Route uridecodebin's dynamic pads: video into the layer chain,
-        // everything else (audio) into a throwaway fakesink — leaving a
-        // decoder pad unlinked would error the pipeline.
-        let video_convert_weak = video_convert.downgrade();
-        let pipeline_weak = pipeline.downgrade();
-        uridecodebin.connect_pad_added(move |_src, pad| {
-            let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
-            if caps.is_empty() {
-                return;
+        Ok(LayerSlot {
+            compositor_pad,
+            producer: Mutex::new(None),
+            fade: Mutex::new(None),
+        })
+    }
+
+    fn slot(&self, layer: Layer) -> &LayerSlot {
+        match layer {
+            Layer::A => &self.inner.layer_a,
+            Layer::B => &self.inner.layer_b,
+        }
+    }
+
+    /// Subscribe to engine events (per-layer EOS / error).
+    pub fn subscribe(&self) -> broadcast::Receiver<MediaEvent> {
+        self.inner.events_tx.subscribe()
+    }
+
+    // ─── Producer lifecycle ────────────────────────────────────────────────
+
+    /// Build a producer for `path` on `layer` and preroll it (PAUSED).
+    /// Replaces any previous producer on that layer. Does not touch the
+    /// display pipeline or the other layer.
+    pub fn load(&self, layer: Layer, path: &Path, kind: MediaKind) -> Result<(), MediaError> {
+        if !path.exists() {
+            tracing::error!(path = %path.display(), ?layer, "load: file does not exist");
+            return Err(MediaError::BadPath(format!("file not found: {}", path.display())));
+        }
+        let abs = path
+            .canonicalize()
+            .map_err(|e| MediaError::BadPath(format!("{}: {e}", path.display())))?;
+        let uri = gst::glib::filename_to_uri(&abs, None)
+            .map_err(|e| MediaError::BadPath(e.to_string()))?;
+
+        tracing::info!(?layer, ?kind, %uri, "load: building producer");
+        let pipeline = self.build_producer(layer, &uri, kind)?;
+        self.install_producer(layer, pipeline, gst::State::Paused)
+    }
+
+    /// Show an SMPTE test pattern on `layer` (replaces any loaded media and
+    /// starts immediately; caller sets alpha).
+    pub fn load_testscreen(&self, layer: Layer) -> Result<(), MediaError> {
+        let pipeline = gst::Pipeline::with_name(&format!("cuemesh2-test-{layer:?}"));
+        let src = make("videotestsrc", None)?;
+        src.set_property("is-live", true);
+        src.set_property_from_str("pattern", "smpte");
+        let convert = make("videoconvert", None)?;
+        let scale = make("videoscale", None)?;
+        let caps = make("capsfilter", None)?;
+        caps.set_property("caps", self.inner.canvas.caps());
+        let sink = make("intervideosink", None)?;
+        sink.set_property("channel", channel_name(layer));
+
+        pipeline
+            .add_many([&src, &convert, &scale, &caps, &sink])
+            .map_err(|e| MediaError::AddMany(e.to_string()))?;
+        gst::Element::link_many([&src, &convert, &scale, &caps, &sink])
+            .map_err(|e| MediaError::LinkElements(e.to_string()))?;
+
+        self.install_producer(layer, pipeline, gst::State::Playing)
+    }
+
+    /// Decoder producer: uridecodebin → (imagefreeze) → convert/scale/rate →
+    /// canvas caps → intervideosink.
+    fn build_producer(
+        &self,
+        layer: Layer,
+        uri: &str,
+        kind: MediaKind,
+    ) -> Result<gst::Pipeline, MediaError> {
+        let pipeline = gst::Pipeline::with_name(&format!("cuemesh2-producer-{layer:?}"));
+
+        let decode = make("uridecodebin", Some("decode"))?;
+        decode.set_property("uri", uri);
+        let convert = make("videoconvert", Some("convert"))?;
+        let scale = make("videoscale", Some("scale"))?;
+        let caps = make("capsfilter", Some("caps"))?;
+        caps.set_property("caps", self.inner.canvas.caps());
+        let sink = make("intervideosink", Some("inter_sink"))?;
+        sink.set_property("channel", channel_name(layer));
+
+        pipeline
+            .add_many([&decode, &convert, &scale, &caps, &sink])
+            .map_err(|e| MediaError::AddMany(e.to_string()))?;
+
+        // Head of the static chain that decoded video pads get linked to.
+        let chain_head = match kind {
+            MediaKind::Video => {
+                let rate = make("videorate", Some("rate"))?;
+                pipeline.add(&rate).map_err(|e| MediaError::AddMany(e.to_string()))?;
+                gst::Element::link_many([&convert, &scale, &rate, &caps, &sink])
+                    .map_err(|e| MediaError::LinkElements(e.to_string()))?;
+                convert.clone()
             }
-            let structure = match caps.structure(0) {
-                Some(s) => s,
-                None => return,
-            };
-            if structure.name().starts_with("video/") {
-                if let Some(vc) = video_convert_weak.upgrade() {
-                    if let Some(sink) = vc.static_pad("sink") {
+            MediaKind::Image => {
+                // imagefreeze turns the single decoded frame into an endless
+                // stream at the canvas framerate.
+                let freeze = make("imagefreeze", Some("freeze"))?;
+                pipeline.add(&freeze).map_err(|e| MediaError::AddMany(e.to_string()))?;
+                gst::Element::link_many([&freeze, &convert, &scale, &caps, &sink])
+                    .map_err(|e| MediaError::LinkElements(e.to_string()))?;
+                freeze
+            }
+        };
+
+        // Route decoded pads: first video pad into the chain, everything else
+        // (audio) into a throwaway fakesink — CueMesh2 is video-only, but an
+        // unlinked decoder pad would error the pipeline.
+        let head_weak = chain_head.downgrade();
+        let pipeline_weak = pipeline.downgrade();
+        decode.connect_pad_added(move |_src, pad| {
+            let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
+            let is_video = caps
+                .structure(0)
+                .map(|s| s.name().starts_with("video/") || s.name().starts_with("image/"))
+                .unwrap_or(false);
+            if is_video {
+                if let Some(head) = head_weak.upgrade() {
+                    if let Some(sink) = head.static_pad("sink") {
                         if !sink.is_linked() {
                             if let Err(e) = pad.link(&sink) {
                                 tracing::warn!(?e, "failed to link video pad");
@@ -234,8 +420,6 @@ impl MediaEngine {
                     }
                 }
             }
-            // Non-video stream, or a second video stream we don't want:
-            // drain it silently so the demuxer doesn't hit not-linked.
             if let Some(pl) = pipeline_weak.upgrade() {
                 let Ok(fakesink) = gst::ElementFactory::make("fakesink")
                     .property("sync", false)
@@ -255,297 +439,191 @@ impl MediaEngine {
             }
         });
 
-        // compositor is an aggregator: it waits for a buffer or EOS on EVERY
-        // sink pad before emitting anything. A file with no video track would
-        // leave this chain starved and stall the whole pipeline, so once the
-        // decoder has revealed all its pads, push EOS if we're still unlinked.
-        let vconv_weak = video_convert.downgrade();
-        uridecodebin.connect_no_more_pads(move |_| {
-            if let Some(vc) = vconv_weak.upgrade() {
-                if let Some(sink) = vc.static_pad("sink") {
-                    if !sink.is_linked() {
-                        tracing::debug!(element = %vc.name(), "no video stream; sending EOS");
-                        let _ = sink.send_event(gst::event::Eos::new());
-                    }
-                }
-            }
-        });
-
-        // Lock this uridecodebin so it stays in NULL until we actually load a
-        // URI. Otherwise pipeline-wide state changes try to preroll an unset
-        // source and fail with "No URI specified to play from".
-        uridecodebin.set_locked_state(true);
-        let _ = uridecodebin.set_state(gst::State::Null);
-
-        Ok(LayerParts {
-            uridecodebin,
-            compositor_pad,
-            video_convert,
-            has_media: AtomicBool::new(false),
-            fade: Mutex::new(None),
-        })
+        Ok(pipeline)
     }
 
-    fn layer(&self, layer: Layer) -> &LayerParts {
-        match layer {
-            Layer::A => &self.inner.layer_a,
-            Layer::B => &self.inner.layer_b,
-        }
-    }
+    /// Swap in a new producer for `layer`, tearing down the old one, and bring
+    /// it to `target` (PAUSED to preroll, PLAYING for live sources).
+    fn install_producer(
+        &self,
+        layer: Layer,
+        pipeline: gst::Pipeline,
+        target: gst::State,
+    ) -> Result<(), MediaError> {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        self.spawn_producer_bus_watch(layer, &pipeline, shutdown.clone());
 
-    fn spawn_bus_watch(&self) {
-        let bus = match self.inner.pipeline.bus() {
-            Some(b) => b,
-            None => return,
+        let new = Producer {
+            pipeline: pipeline.clone(),
+            bus_shutdown: shutdown,
         };
-        let tx = self.inner.events_tx.clone();
-        let pipeline = self.inner.pipeline.clone();
-        // Use the glib main-context-free variant so we don't need a running loop.
-        std::thread::Builder::new()
-            .name("cuemesh2-media-bus".into())
-            .spawn(move || {
-                for msg in bus.iter_timed(gst::ClockTime::NONE) {
-                    use gst::MessageView as M;
-                    match msg.view() {
-                        M::Eos(_) => {
-                            tracing::info!("bus: EOS");
-                            let _ = tx.send(MediaEvent::Eos(Layer::A));
-                        }
-                        M::Error(err) => {
-                            let src = err
-                                .src()
-                                .map(|s| s.path_string().to_string())
-                                .unwrap_or_else(|| "unknown".into());
-                            let dbg = err.debug().map(|d| d.to_string()).unwrap_or_default();
-                            tracing::error!(
-                                source = %src,
-                                error = %err.error(),
-                                debug = %dbg,
-                                "bus: ERROR"
-                            );
-                            let _ = tx.send(MediaEvent::Error {
-                                source: src,
-                                message: format!("{} — {}", err.error(), dbg),
-                            });
-                        }
-                        M::Warning(w) => {
-                            let src = w
-                                .src()
-                                .map(|s| s.path_string().to_string())
-                                .unwrap_or_else(|| "unknown".into());
-                            let dbg = w.debug().map(|d| d.to_string()).unwrap_or_default();
-                            tracing::warn!(source = %src, warning = %w.error(), debug = %dbg, "bus: WARNING");
-                        }
-                        M::Info(i) => {
-                            let src = i
-                                .src()
-                                .map(|s| s.path_string().to_string())
-                                .unwrap_or_else(|| "unknown".into());
-                            tracing::info!(source = %src, info = %i.error(), "bus: INFO");
-                        }
-                        M::StateChanged(sc) => {
-                            if sc
-                                .src()
-                                .map(|s| s == pipeline.upcast_ref::<gst::Object>())
-                                .unwrap_or(false)
-                            {
-                                tracing::debug!(
-                                    old = ?sc.old(),
-                                    new = ?sc.current(),
-                                    pending = ?sc.pending(),
-                                    "bus: pipeline state changed"
-                                );
-                                let _ = tx.send(MediaEvent::State(sc.current()));
-                            }
-                        }
-                        M::StreamStatus(s) => {
-                            tracing::trace!(kind = ?s.type_(), "bus: stream status");
-                        }
-                        M::AsyncDone(_) => {
-                            tracing::debug!("bus: async done");
-                        }
-                        M::Buffering(b) => {
-                            tracing::debug!(percent = b.percent(), "bus: buffering");
-                        }
-                        other => {
-                            tracing::trace!(?other, "bus: other");
-                        }
-                    }
-                }
-            })
-            .expect("spawn bus watch thread");
-    }
+        let old = {
+            let slot = self.slot(layer);
+            let mut guard = slot.producer.lock().unwrap_or_else(|p| p.into_inner());
+            guard.replace(new)
+        };
+        if let Some(old) = old {
+            old.teardown();
+        }
 
-    /// Subscribe to engine events (EOS, error, state).
-    pub fn subscribe(&self) -> broadcast::Receiver<MediaEvent> {
-        self.inner.events_tx.subscribe()
-    }
-
-    /// Point a layer at a media file. Pipeline is set to PAUSED to preroll.
-    pub fn load(&self, layer: Layer, path: &Path) -> Result<(), MediaError> {
-        if !path.exists() {
-            tracing::error!(path = %path.display(), ?layer, "load: file does not exist");
-            return Err(MediaError::BadPath(format!(
-                "file not found: {}",
-                path.display()
+        pipeline
+            .set_state(target)
+            .map_err(|e| MediaError::StateChange(format!("producer set_state({target:?}): {e}")))?;
+        // Wait for preroll so failures (bad file, missing decoder) surface here.
+        let (result, current, pending) = pipeline.state(gst::ClockTime::from_seconds(5));
+        tracing::info!(?layer, ?result, ?current, ?pending, "producer preroll finished");
+        if result.is_err() {
+            return Err(MediaError::StateChange(format!(
+                "producer preroll failed (state={current:?}) — see bus errors"
             )));
         }
-        let abs = path
-            .canonicalize()
-            .map_err(|e| MediaError::BadPath(format!("{}: {e}", path.display())))?;
-        let uri = gst::glib::filename_to_uri(&abs, None)
-            .map_err(|e| MediaError::BadPath(e.to_string()))?;
-        tracing::info!(?layer, %uri, "load: setting uridecodebin uri");
-        let parts = self.layer(layer);
-        parts.uridecodebin.set_property("uri", uri.as_str());
-        parts.has_media.store(true, Ordering::SeqCst);
-        // Release the initial NULL lock and let this layer follow the pipeline
-        // state. sync_state_with_parent brings the layer up to whatever the
-        // pipeline is currently at (typically READY or PAUSED).
-        parts.uridecodebin.set_locked_state(false);
-        if let Err(e) = parts.uridecodebin.sync_state_with_parent() {
-            tracing::warn!(?e, ?layer, "sync_state_with_parent failed");
+        Ok(())
+    }
+
+    /// Run `f` with the layer's producer pipeline, or `NoProducer`.
+    fn with_producer<T>(
+        &self,
+        layer: Layer,
+        f: impl FnOnce(&gst::Pipeline) -> T,
+    ) -> Result<T, MediaError> {
+        let slot = self.slot(layer);
+        let guard = slot.producer.lock().unwrap_or_else(|p| p.into_inner());
+        match guard.as_ref() {
+            Some(p) => Ok(f(&p.pipeline)),
+            None => Err(MediaError::NoProducer(layer)),
         }
-        match self.inner.pipeline.set_state(gst::State::Paused) {
-            Ok(sc) => {
-                tracing::debug!(result = ?sc, "load: set_state(Paused) accepted");
-                // The other layer's chains are linked into compositor/audiomixer
-                // even when it has no media, and those aggregators wait for a
-                // buffer or EOS on every sink pad before emitting anything.
-                // Mark an idle layer's chains EOS so preroll can complete.
-                // (Pads only accept events once activated, hence after the
-                // Paused transition starts, not at construction time.)
-                self.mark_layer_eos_if_idle(other(layer));
-                // Wait briefly for preroll so we surface async failures inline.
-                let (result, current, pending) =
-                    self.inner.pipeline.state(gst::ClockTime::from_seconds(3));
-                tracing::info!(
-                    ?result,
-                    ?current,
-                    ?pending,
-                    "load: preroll wait finished"
-                );
-                if result.is_err() {
-                    return Err(MediaError::StateChange(format!(
-                        "preroll failed (state={current:?}, pending={pending:?}) — see bus errors above"
-                    )));
+    }
+
+    // ─── Transport ─────────────────────────────────────────────────────────
+
+    /// Start (or resume) playback on a layer.
+    pub fn play(&self, layer: Layer) -> Result<(), MediaError> {
+        self.with_producer(layer, |p| {
+            p.set_state(gst::State::Playing)
+                .map(|_| ())
+                .map_err(|e| MediaError::StateChange(format!("play({layer:?}): {e}")))
+        })?
+    }
+
+    /// Freeze a layer in place (display keeps showing the last frame).
+    pub fn pause(&self, layer: Layer) -> Result<(), MediaError> {
+        self.with_producer(layer, |p| {
+            p.set_state(gst::State::Paused)
+                .map(|_| ())
+                .map_err(|e| MediaError::StateChange(format!("pause({layer:?}): {e}")))
+        })?
+    }
+
+    /// Freeze both layers (no-op on empty layers).
+    pub fn pause_all(&self) {
+        for layer in [Layer::A, Layer::B] {
+            if let Err(e) = self.pause(layer) {
+                if !matches!(e, MediaError::NoProducer(_)) {
+                    tracing::warn!(?layer, %e, "pause_all");
                 }
-                Ok(())
             }
-            Err(e) => Err(MediaError::StateChange(format!(
-                "set_state(Paused) rejected: {e} — see bus errors above"
-            ))),
         }
     }
 
-    /// Set the whole pipeline to PLAYING.
-    pub fn play(&self) -> Result<(), MediaError> {
-        tracing::info!("play: set_state(Playing)");
-        match self.inner.pipeline.set_state(gst::State::Playing) {
-            Ok(sc) => {
-                tracing::debug!(result = ?sc, "play: accepted");
-                Ok(())
-            }
-            Err(e) => Err(MediaError::StateChange(format!(
-                "set_state(Playing) rejected: {e} — see bus errors above"
-            ))),
+    /// Tear down a layer's producer and make the layer transparent.
+    pub fn stop(&self, layer: Layer) {
+        self.abort_fade(layer);
+        let old = {
+            let slot = self.slot(layer);
+            let mut guard = slot.producer.lock().unwrap_or_else(|p| p.into_inner());
+            guard.take()
+        };
+        if let Some(old) = old {
+            old.teardown();
         }
+        self.slot(layer).compositor_pad.set_property("alpha", 0.0f64);
     }
 
-    /// Freeze all playback in place.
-    pub fn pause(&self) -> Result<(), MediaError> {
-        self.inner
-            .pipeline
-            .set_state(gst::State::Paused)
-            .map_err(|e| MediaError::StateChange(e.to_string()))?;
-        Ok(())
+    /// Cut everything to black: both producers torn down, alphas zeroed.
+    /// The display pipeline keeps running (black frame).
+    pub fn stop_all(&self) {
+        self.stop(Layer::A);
+        self.stop(Layer::B);
     }
 
-    /// Cut everything to black and stop the pipeline.
-    pub fn stop(&self) -> Result<(), MediaError> {
-        self.abort_fade(Layer::A);
-        self.abort_fade(Layer::B);
-        self.inner.layer_a.compositor_pad.set_property("alpha", 0.0f64);
-        self.inner.layer_b.compositor_pad.set_property("alpha", 0.0f64);
-        self.inner
-            .pipeline
-            .set_state(gst::State::Ready)
-            .map_err(|e| MediaError::StateChange(e.to_string()))?;
-        Ok(())
+    /// True if the layer currently has a producer (loaded or playing).
+    pub fn is_loaded(&self, layer: Layer) -> bool {
+        let slot = self.slot(layer);
+        slot.producer
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
     }
+
+    /// Seek a layer to a position in ms.
+    pub fn seek_ms(&self, layer: Layer, position_ms: u64) -> Result<(), MediaError> {
+        self.with_producer(layer, |p| {
+            p.seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::ClockTime::from_mseconds(position_ms),
+            )
+            .map_err(|e| MediaError::StateChange(e.to_string()))
+        })?
+    }
+
+    /// Adjust playback rate on a layer via a non-flushing position-preserving
+    /// seek. Used sparingly by drift correction.
+    pub fn set_rate(&self, layer: Layer, rate: f64) -> Result<(), MediaError> {
+        if rate <= 0.0 {
+            return Ok(());
+        }
+        self.with_producer(layer, |p| {
+            let pos = p
+                .query_position::<gst::ClockTime>()
+                .unwrap_or(gst::ClockTime::ZERO);
+            p.seek(
+                rate,
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                gst::SeekType::Set,
+                pos,
+                gst::SeekType::End,
+                gst::ClockTime::ZERO,
+            )
+            .map_err(|e| MediaError::StateChange(e.to_string()))
+        })?
+    }
+
+    /// Current playback position of a layer in ms.
+    pub fn position_ms(&self, layer: Layer) -> Option<u64> {
+        self.with_producer(layer, |p| {
+            p.query_position::<gst::ClockTime>().map(|t| t.mseconds())
+        })
+        .ok()
+        .flatten()
+    }
+
+    /// Duration of the media on a layer in ms, if known.
+    pub fn duration_ms(&self, layer: Layer) -> Option<u64> {
+        self.with_producer(layer, |p| {
+            p.query_duration::<gst::ClockTime>().map(|t| t.mseconds())
+        })
+        .ok()
+        .flatten()
+    }
+
+    // ─── Alpha / fades ─────────────────────────────────────────────────────
 
     /// Set a compositor sink pad's alpha directly (no ramp).
     pub fn set_alpha(&self, layer: Layer, alpha: f64) {
         self.abort_fade(layer);
-        self.layer(layer)
+        self.slot(layer)
             .compositor_pad
             .set_property("alpha", alpha.clamp(0.0, 1.0));
     }
 
     /// Read the current compositor alpha for a layer.
     pub fn alpha(&self, layer: Layer) -> f64 {
-        self.layer(layer).compositor_pad.property::<f64>("alpha")
-    }
-
-    /// No-op: CueMesh2 is video-only; audio streams are decoded to a fakesink.
-    /// Kept so the protocol surface (`SET_VOLUME`, per-cue volume) stays valid.
-    pub fn set_volume(&self, _layer: Layer, _volume: u8) {}
-
-    /// Rate is applied via a pipeline seek. Called sparingly during drift correction.
-    pub fn set_rate(&self, rate: f64) -> Result<(), MediaError> {
-        let pos = self
-            .inner
-            .pipeline
-            .query_position::<gst::ClockTime>()
-            .unwrap_or(gst::ClockTime::ZERO);
-        let flags = gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE;
-        if rate >= 0.0 {
-            self.inner
-                .pipeline
-                .seek(rate, flags, gst::SeekType::Set, pos, gst::SeekType::End, gst::ClockTime::ZERO)
-                .map_err(|e| MediaError::StateChange(e.to_string()))?;
-        }
-        Ok(())
-    }
-
-    /// Seek the pipeline to a position in ms (both layers).
-    pub fn seek_ms(&self, position_ms: u64) -> Result<(), MediaError> {
-        let pos = gst::ClockTime::from_mseconds(position_ms);
-        self.inner
-            .pipeline
-            .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT, pos)
-            .map_err(|e| MediaError::StateChange(e.to_string()))?;
-        Ok(())
-    }
-
-    /// Current playback position in ms, or None if not queryable yet.
-    pub fn position_ms(&self) -> Option<u64> {
-        self.inner
-            .pipeline
-            .query_position::<gst::ClockTime>()
-            .map(|t| t.mseconds())
-    }
-
-    /// Push EOS into a layer's video chain head if the layer has never been
-    /// given media. The compositor treats an EOS pad as "don't wait", which
-    /// is what lets a single-layer show preroll at all. A later `load` on the
-    /// layer clears the EOS state via the decoder's STREAM_START.
-    fn mark_layer_eos_if_idle(&self, layer: Layer) {
-        let parts = self.layer(layer);
-        if parts.has_media.load(Ordering::SeqCst) {
-            return;
-        }
-        if let Some(sink) = parts.video_convert.static_pad("sink") {
-            if !sink.is_linked() {
-                tracing::debug!(?layer, "idle layer: sending EOS");
-                let _ = sink.send_event(gst::event::Eos::new());
-            }
-        }
+        self.slot(layer).compositor_pad.property::<f64>("alpha")
     }
 
     fn abort_fade(&self, layer: Layer) {
-        let parts = self.layer(layer);
-        if let Ok(mut guard) = parts.fade.lock() {
+        let slot = self.slot(layer);
+        if let Ok(mut guard) = slot.fade.lock() {
             if let Some(handle) = guard.take() {
                 handle.abort();
             }
@@ -554,8 +632,8 @@ impl MediaEngine {
 
     /// Replace this layer's active fade task with a new one.
     pub(crate) fn install_fade(&self, layer: Layer, handle: tokio::task::JoinHandle<()>) {
-        let parts = self.layer(layer);
-        if let Ok(mut guard) = parts.fade.lock() {
+        let slot = self.slot(layer);
+        if let Ok(mut guard) = slot.fade.lock() {
             if let Some(prev) = guard.replace(handle) {
                 prev.abort();
             }
@@ -564,14 +642,102 @@ impl MediaEngine {
 
     /// Direct access to the compositor pad for the fade animator.
     pub(crate) fn compositor_pad(&self, layer: Layer) -> gst::Pad {
-        self.layer(layer).compositor_pad.clone()
+        self.slot(layer).compositor_pad.clone()
+    }
+
+    // ─── Bus watches ───────────────────────────────────────────────────────
+
+    /// Display-pipeline problems are engine-fatal enough to log loudly, but we
+    /// intentionally never forward them as layer events.
+    fn spawn_display_bus_watch(&self) {
+        let Some(bus) = self.inner.display.bus() else { return };
+        std::thread::Builder::new()
+            .name("cuemesh2-display-bus".into())
+            .spawn(move || {
+                for msg in bus.iter_timed(gst::ClockTime::NONE) {
+                    use gst::MessageView as M;
+                    match msg.view() {
+                        M::Error(err) => {
+                            tracing::error!(
+                                source = %err.src().map(|s| s.path_string().to_string()).unwrap_or_default(),
+                                error = %err.error(),
+                                debug = %err.debug().map(|d| d.to_string()).unwrap_or_default(),
+                                "display bus: ERROR"
+                            );
+                        }
+                        M::Warning(w) => {
+                            tracing::warn!(warning = %w.error(), "display bus: WARNING");
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .expect("spawn display bus watch");
+    }
+
+    /// Per-producer bus watch. Exits when the producer is torn down.
+    fn spawn_producer_bus_watch(
+        &self,
+        layer: Layer,
+        pipeline: &gst::Pipeline,
+        shutdown: Arc<AtomicBool>,
+    ) {
+        let Some(bus) = pipeline.bus() else { return };
+        let tx = self.inner.events_tx.clone();
+        std::thread::Builder::new()
+            .name(format!("cuemesh2-producer-bus-{layer:?}"))
+            .spawn(move || {
+                while !shutdown.load(Ordering::SeqCst) {
+                    let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(300)) else {
+                        continue;
+                    };
+                    use gst::MessageView as M;
+                    match msg.view() {
+                        M::Eos(_) => {
+                            tracing::info!(?layer, "producer: EOS");
+                            let _ = tx.send(MediaEvent::Eos(layer));
+                        }
+                        M::Error(err) => {
+                            let source = err
+                                .src()
+                                .map(|s| s.path_string().to_string())
+                                .unwrap_or_else(|| "unknown".into());
+                            let dbg = err.debug().map(|d| d.to_string()).unwrap_or_default();
+                            tracing::error!(?layer, source = %source, error = %err.error(), debug = %dbg, "producer: ERROR");
+                            let _ = tx.send(MediaEvent::Error {
+                                layer,
+                                source,
+                                message: err.error().to_string(),
+                            });
+                        }
+                        M::Warning(w) => {
+                            tracing::warn!(?layer, warning = %w.error(), "producer: WARNING");
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .expect("spawn producer bus watch");
     }
 }
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
+        for slot in [&self.layer_a, &self.layer_b] {
+            if let Ok(mut guard) = slot.producer.lock() {
+                if let Some(p) = guard.take() {
+                    p.teardown();
+                }
+            }
+        }
+        let _ = self.display.set_state(gst::State::Null);
     }
+}
+
+/// Sleep helper used by tests; producers settle asynchronously.
+#[cfg(test)]
+fn settle() {
+    std::thread::sleep(std::time::Duration::from_millis(50));
 }
 
 #[cfg(test)]
@@ -579,11 +745,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builds_pipeline_without_media() {
+    fn builds_engine_and_starts_black() {
         let engine = MediaEngine::new().expect("build");
-        // Alphas start at A=1.0, B=0.0.
-        assert!((engine.alpha(Layer::A) - 1.0).abs() < 1e-6);
+        settle();
+        // Both layers start transparent.
+        assert!((engine.alpha(Layer::A) - 0.0).abs() < 1e-6);
         assert!((engine.alpha(Layer::B) - 0.0).abs() < 1e-6);
+        assert!(!engine.is_loaded(Layer::A));
+        assert!(!engine.is_loaded(Layer::B));
     }
 
     #[test]
@@ -591,5 +760,23 @@ mod tests {
         let engine = MediaEngine::new().expect("build");
         engine.set_alpha(Layer::B, 0.5);
         assert!((engine.alpha(Layer::B) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn transport_errors_without_producer() {
+        let engine = MediaEngine::new().expect("build");
+        assert!(matches!(engine.play(Layer::A), Err(MediaError::NoProducer(Layer::A))));
+        assert!(engine.position_ms(Layer::A).is_none());
+        // stop on an empty layer is a harmless no-op.
+        engine.stop(Layer::A);
+    }
+
+    #[test]
+    fn testscreen_loads_and_stops() {
+        let engine = MediaEngine::new().expect("build");
+        engine.load_testscreen(Layer::A).expect("testscreen");
+        assert!(engine.is_loaded(Layer::A));
+        engine.stop(Layer::A);
+        assert!(!engine.is_loaded(Layer::A));
     }
 }

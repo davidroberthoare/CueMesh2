@@ -89,7 +89,10 @@ async fn connect_once(
             interval.tick().await;
             let pb = {
                 let mut s = status_state.lock().unwrap();
-                s.playback.position_ms = status_engine.position_ms().unwrap_or(0);
+                s.playback.position_ms = status_engine
+                    .position_ms(cuemesh2_media::Layer::A)
+                    .or_else(|| status_engine.position_ms(cuemesh2_media::Layer::B))
+                    .unwrap_or(0);
                 s.playback.layer_a_alpha = status_engine.alpha(cuemesh2_media::Layer::A) as f32;
                 s.playback.layer_b_alpha = status_engine.alpha(cuemesh2_media::Layer::B) as f32;
                 s.playback.clone()
@@ -172,18 +175,16 @@ async fn handle_controller_msg(
             log(
                 state,
                 format!(
-                    "LOAD_CUE {} → layer {:?}  file={}  exists={}  vol={}  fade_in={}ms",
+                    "LOAD_CUE {} → layer {:?}  file={}  exists={}  fade_in={}ms",
                     c.cue_id,
                     c.layer,
                     c.file.display(),
                     exists,
-                    c.volume,
                     c.fade_in_ms
                 ),
             );
-            engine.set_volume(ml, c.volume);
-            engine.set_alpha(ml, if c.fade_in_ms > 0 { 0.0 } else { 1.0 });
-            match engine.load(ml, &c.file) {
+            engine.set_alpha(ml, 0.0);
+            match engine.load(ml, &c.file, cuemesh2_media::MediaKind::Video) {
                 Ok(_) => {
                     let mut s = state.lock().unwrap();
                     s.playback.current_cue_id = Some(c.cue_id.clone());
@@ -209,7 +210,7 @@ async fn handle_controller_msg(
             if delay > 0 {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
             }
-            match engine.play() {
+            match engine.play(ml) {
                 Ok(_) => {
                     state.lock().unwrap().playback.state = PlaybackState::Playing;
                     let fade_in = PENDING_FADE_IN.swap(0, std::sync::atomic::Ordering::SeqCst);
@@ -223,22 +224,21 @@ async fn handle_controller_msg(
             }
         }
         ControllerMsg::SeekTo(s) => {
-            if let Err(e) = engine.seek_ms(s.position_ms) {
+            if let Err(e) = engine.seek_ms(media_layer(s.layer), s.position_ms) {
                 log(state, format!("seek failed: {e}"));
             }
         }
         ControllerMsg::SetRate(r) => {
-            if let Err(e) = engine.set_rate(r.rate as f64) {
+            if let Err(e) = engine.set_rate(media_layer(r.layer), r.rate as f64) {
                 log(state, format!("set_rate failed: {e}"));
             }
         }
-        ControllerMsg::SetVolume(v) => engine.set_volume(media_layer(v.layer), v.volume),
+        ControllerMsg::SetVolume(_) => {
+            // CueMesh2 is video-only; volume commands are accepted and ignored.
+        }
         ControllerMsg::Pause => {
-            if let Err(e) = engine.pause() {
-                log(state, format!("pause failed: {e}"));
-            } else {
-                state.lock().unwrap().playback.state = PlaybackState::Paused;
-            }
+            engine.pause_all();
+            state.lock().unwrap().playback.state = PlaybackState::Paused;
         }
         ControllerMsg::Fade(cmd) => {
             let dur = Duration::from_millis(cmd.duration_ms as u64);
@@ -248,16 +248,12 @@ async fn handle_controller_msg(
             let state_clone = state.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(dur).await;
-                if let Err(e) = engine_clone.stop() {
-                    log(&state_clone, format!("post-fade stop failed: {e}"));
-                }
+                engine_clone.stop_all();
                 state_clone.lock().unwrap().playback.state = PlaybackState::Black;
             });
         }
         ControllerMsg::Stop => {
-            if let Err(e) = engine.stop() {
-                log(state, format!("stop failed: {e}"));
-            }
+            engine.stop_all();
             let mut s = state.lock().unwrap();
             s.playback.state = PlaybackState::Black;
             s.playback.current_cue_id = None;
@@ -268,7 +264,14 @@ async fn handle_controller_msg(
             log(state, format!("(unimplemented) manual crossfade to {} in {}ms", cf.to_cue_id, cf.duration_ms));
         }
         ControllerMsg::ShowTestscreen => {
-            log(state, "(unimplemented) show testscreen");
+            match engine.load_testscreen(cuemesh2_media::Layer::A) {
+                Ok(_) => {
+                    engine.set_alpha(cuemesh2_media::Layer::A, 1.0);
+                    engine.set_alpha(cuemesh2_media::Layer::B, 0.0);
+                    log(state, "testscreen on layer A");
+                }
+                Err(e) => log(state, format!("testscreen failed: {e}")),
+            }
         }
         ControllerMsg::RequestStatus | ControllerMsg::ReadyCheck => {
             // Status is sent on our own cadence.
@@ -297,10 +300,9 @@ fn spawn_media_event_pump(engine: MediaEngine, state: SharedState) {
         loop {
             match rx.recv().await {
                 Ok(MediaEvent::Eos(layer)) => log(&state, format!("engine: EOS on layer {layer:?}")),
-                Ok(MediaEvent::Error { source, message }) => {
-                    log(&state, format!("engine ERROR [{source}]: {message}"))
+                Ok(MediaEvent::Error { layer, source, message }) => {
+                    log(&state, format!("engine ERROR layer {layer:?} [{source}]: {message}"))
                 }
-                Ok(MediaEvent::State(s)) => log(&state, format!("engine state → {s:?}")),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     log(&state, format!("engine event stream lagged, dropped {n}"))
                 }
