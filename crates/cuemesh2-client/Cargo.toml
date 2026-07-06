@@ -1,0 +1,36 @@
+[package]
+name = "cuemesh2-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CueMesh2 client: connects to a controller and drives the local GStreamer pipeline."
+
+[[bin]]
+name = "cuemesh2-client"
+path = "src/main.rs"
+
+[dependencies]
+cuemesh2-shared = { workspace = true }
+cuemesh2-media = { workspace = true }
+
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+mdns-sd = { workspace = true }
+
+eframe = { workspace = true }
+egui = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+anyhow = { workspace = true }
+dirs = { workspace = true }
+uuid = { workspace = true }

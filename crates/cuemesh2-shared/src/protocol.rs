@@ -1,0 +1,320 @@
+//! Wire protocol for CueMesh2.
+//!
+//! All messages are JSON envelopes over WebSocket. Envelope shape:
+//!
+//! ```json
+//! { "type": "<MSG_TYPE>", "ts_utc_ms": 1234567890123, "payload": { ... } }
+//! ```
+//!
+//! [`ControllerMsg`] is what the controller sends to clients; [`ClientMsg`] is
+//! what clients send back. Each direction is a serde-tagged enum so adding a
+//! variant is a one-line change.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+/// Envelope wrapping any protocol message with the sender's UTC timestamp.
+///
+/// Serializes flat: `{"ts_utc_ms": ..., "type": ..., "payload": ...}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope<M> {
+    pub ts_utc_ms: u64,
+    #[serde(flatten)]
+    pub msg: M,
+}
+
+impl<M> Envelope<M> {
+    pub fn new(ts_utc_ms: u64, msg: M) -> Self {
+        Self { ts_utc_ms, msg }
+    }
+}
+
+/// One of the two video layers the client compositor exposes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum Layer {
+    A,
+    B,
+}
+
+/// Playback state reported by clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ClientState {
+    Idle,
+    Loading,
+    Ready,
+    Playing,
+    Paused,
+    Error,
+    Black,
+}
+
+// ─── Controller → Client ──────────────────────────────────────────────────
+
+/// Messages sent from controller to client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ControllerMsg {
+    HelloAck(HelloAck),
+    LoadCue(LoadCue),
+    PlayAt(PlayAt),
+    SeekTo(SeekTo),
+    SetRate(SetRate),
+    SetVolume(SetVolume),
+    Crossfade(Crossfade),
+    /// Freeze all layers in place (no fades).
+    Pause,
+    /// Fade all layers to black over the given duration, then stop.
+    /// The controller reads its show's `default_fade_ms` and fills this in;
+    /// clients don't need the show file to honour the command.
+    Fade(FadeCmd),
+    /// Cut all layers to black immediately, stop pipelines.
+    Stop,
+    ShowTestscreen,
+    RequestStatus,
+    Sync(SyncPing),
+    ReadyCheck,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HelloAck {
+    pub controller_name: String,
+    pub protocol_version: u32,
+}
+
+/// Preroll a cue onto a specific layer without playing it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadCue {
+    pub cue_id: String,
+    pub layer: Layer,
+    pub file: PathBuf,
+    #[serde(default)]
+    pub start_ms: Option<u64>,
+    #[serde(default)]
+    pub end_ms: Option<u64>,
+    pub volume: u8,
+    pub fade_in_ms: u32,
+    pub fade_out_ms: u32,
+    #[serde(default)]
+    pub crossfade_to_next_ms: u32,
+}
+
+/// Start the preloaded cue at a synchronized wall-clock time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayAt {
+    pub layer: Layer,
+    pub master_start_utc_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeekTo {
+    pub layer: Layer,
+    pub position_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetRate {
+    pub layer: Layer,
+    pub rate: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetVolume {
+    pub layer: Layer,
+    pub volume: u8,
+}
+
+/// Operator-triggered manual crossfade to a specific cue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Crossfade {
+    pub to_cue_id: String,
+    pub duration_ms: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FadeCmd {
+    pub duration_ms: u32,
+}
+
+/// Controller-driven NTP-style sync ping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncPing {
+    /// Controller's UTC time when this ping was sent.
+    pub t1_utc_ms: u64,
+    /// Opaque token echoed back in the reply.
+    pub token: u64,
+}
+
+// ─── Client → Controller ──────────────────────────────────────────────────
+
+/// Messages sent from client to controller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ClientMsg {
+    Hello(Hello),
+    Ready(Ready),
+    Status(Status),
+    Drift(Drift),
+    Heartbeat,
+    Log(LogEntry),
+    SyncReply(SyncReply),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Hello {
+    pub client_id: String,
+    pub name: String,
+    pub protocol_version: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ready {
+    pub cue_id: String,
+    pub layer: Layer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Status {
+    pub state: ClientState,
+    pub current_cue_id: Option<String>,
+    pub position_ms: u64,
+    pub rate: f32,
+    pub volume: u8,
+    pub layer_a_alpha: f32,
+    pub layer_b_alpha: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Drift {
+    pub drift_ms: i64,
+    pub filtered_offset_ms: i64,
+    pub sample_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub level: LogLevel,
+    pub message: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncReply {
+    pub token: u64,
+    pub t1_utc_ms: u64,
+    pub t2_local_ms: u64,
+    pub t3_local_ms: u64,
+}
+
+/// Current protocol version. Bump when wire format changes in a breaking way.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// TCP port the controller listens on.
+pub const DEFAULT_PORT: u16 = 9420;
+
+/// mDNS service type advertised by the controller.
+pub const MDNS_SERVICE_TYPE: &str = "_cuemesh._tcp.local.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn controller_pause_roundtrip() {
+        let env = Envelope::new(42, ControllerMsg::Pause);
+        let json = serde_json::to_string(&env).unwrap();
+        assert_eq!(json, r#"{"ts_utc_ms":42,"type":"PAUSE"}"#);
+        let back: Envelope<ControllerMsg> = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.msg, ControllerMsg::Pause));
+        assert_eq!(back.ts_utc_ms, 42);
+    }
+
+    #[test]
+    fn controller_fade_roundtrip() {
+        let env = Envelope::new(1, ControllerMsg::Fade(FadeCmd { duration_ms: 1500 }));
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(json.contains(r#""type":"FADE""#));
+        let back: Envelope<ControllerMsg> = serde_json::from_str(&json).unwrap();
+        match back.msg {
+            ControllerMsg::Fade(f) => assert_eq!(f.duration_ms, 1500),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn controller_load_cue_roundtrip() {
+        let env = Envelope::new(
+            100,
+            ControllerMsg::LoadCue(LoadCue {
+                cue_id: "cue-1".into(),
+                layer: Layer::A,
+                file: PathBuf::from("intro.mp4"),
+                start_ms: None,
+                end_ms: Some(30_000),
+                volume: 90,
+                fade_in_ms: 500,
+                fade_out_ms: 0,
+                crossfade_to_next_ms: 1000,
+            }),
+        );
+        let json = serde_json::to_string(&env).unwrap();
+        let back: Envelope<ControllerMsg> = serde_json::from_str(&json).unwrap();
+        match back.msg {
+            ControllerMsg::LoadCue(c) => {
+                assert_eq!(c.cue_id, "cue-1");
+                assert_eq!(c.layer, Layer::A);
+                assert_eq!(c.volume, 90);
+                assert_eq!(c.crossfade_to_next_ms, 1000);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_hello_roundtrip() {
+        let env = Envelope::new(
+            0,
+            ClientMsg::Hello(Hello {
+                client_id: "abc".into(),
+                name: "Stage Left".into(),
+                protocol_version: PROTOCOL_VERSION,
+            }),
+        );
+        let json = serde_json::to_string(&env).unwrap();
+        let back: Envelope<ClientMsg> = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.msg, ClientMsg::Hello(_)));
+    }
+
+    #[test]
+    fn sync_reply_roundtrip() {
+        let env = Envelope::new(
+            999,
+            ClientMsg::SyncReply(SyncReply {
+                token: 7,
+                t1_utc_ms: 1_000,
+                t2_local_ms: 500,
+                t3_local_ms: 505,
+            }),
+        );
+        let s = serde_json::to_string(&env).unwrap();
+        let back: Envelope<ClientMsg> = serde_json::from_str(&s).unwrap();
+        if let ClientMsg::SyncReply(r) = back.msg {
+            assert_eq!(r.token, 7);
+            assert_eq!(r.t3_local_ms, 505);
+        } else {
+            panic!();
+        }
+    }
+}

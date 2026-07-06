@@ -1,0 +1,46 @@
+[show]
+title = "Example Show"
+version = 1
+media_root = "~/cuemesh_media"
+dropout_policy = "continue"          # continue | freeze | black
+
+[show.sync]
+max_drift_ms = 150
+start_lead_ms = 250
+
+[show.sync.correction]
+rate_min = 0.95
+rate_max = 1.05
+hard_seek_threshold_ms = 300
+sync_interval_ms = 1000
+
+[show.settings]
+default_fade_ms = 1500               # used by the operator FADE command
+
+[[cues]]
+id = "cue-001"
+name = "Opening Title"
+type = "image"
+file = "pic1.jpg"
+volume = 100
+fade_in_ms = 500
+fade_out_ms = 500
+
+[[cues]]
+id = "cue-002"
+name = "Intro Video"
+type = "video"
+file = "countdown.mp4"
+volume = 85
+fade_in_ms = 750
+fade_out_ms = 0
+crossfade_to_next_ms = 1000          # crossfade into cue-003
+
+[[cues]]
+id = "cue-003"
+name = "Main Loop"
+type = "video"
+file = "test1.mp4"
+volume = 90
+fade_in_ms = 0
+fade_out_ms = 1500
