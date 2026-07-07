@@ -32,6 +32,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -93,9 +94,14 @@ pub struct Canvas {
 
 impl Default for Canvas {
     fn default() -> Self {
+        // 720p: theatre projection is viewed at a distance, so resolution
+        // matters less than per-frame cost — a 1080p canvas more than doubles
+        // the software convert + texture upload for no visible benefit, and
+        // upscales what is typically 720p source media. Shows that want 1080p
+        // can pass an explicit canvas (client: CUEMESH_CANVAS=1920x1080@30).
         Self {
-            width: 1920,
-            height: 1080,
+            width: 1280,
+            height: 720,
             fps_n: 30,
             fps_d: 1,
         }
@@ -165,6 +171,58 @@ struct LayerSlot {
 /// lands, so the UI can repaint on frame arrival instead of polling.
 type FrameNotify = Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>;
 
+/// Frame-arrival interval tracker for the display sink. Logs a summary every
+/// few seconds so hitches show up as numbers (gaps ≫ the frame interval)
+/// instead of guesswork. Mirrors the stats the playback-spike bench prints.
+struct SinkStats {
+    expected_ms: f64,
+    last: Option<Instant>,
+    deltas_ms: Vec<f64>,
+    last_report: Instant,
+}
+
+impl SinkStats {
+    fn new(canvas: &Canvas) -> Self {
+        Self {
+            expected_ms: 1000.0 * canvas.fps_d.max(1) as f64 / canvas.fps_n.max(1) as f64,
+            last: None,
+            deltas_ms: Vec::with_capacity(256),
+            last_report: Instant::now(),
+        }
+    }
+
+    fn tick(&mut self) {
+        let now = Instant::now();
+        if let Some(prev) = self.last {
+            self.deltas_ms.push(now.duration_since(prev).as_secs_f64() * 1000.0);
+        }
+        self.last = Some(now);
+
+        if now.duration_since(self.last_report).as_secs() >= 5 && !self.deltas_ms.is_empty() {
+            self.last_report = now;
+            let mut d = std::mem::take(&mut self.deltas_ms);
+            d.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = d.len();
+            let avg = d.iter().sum::<f64>() / n as f64;
+            let p95 = d[((n as f64 * 0.95) as usize).min(n - 1)];
+            let max = d[n - 1];
+            // A "gap" is a missing frame slot: the sink went silent for at
+            // least half an extra frame interval.
+            let gaps = d.iter().filter(|&&v| v > self.expected_ms * 1.5).count();
+            tracing::info!(
+                target: "cuemesh2_media::framestats",
+                n,
+                fps = format!("{:.2}", 1000.0 / avg),
+                avg_ms = format!("{avg:.2}"),
+                p95_ms = format!("{p95:.2}"),
+                max_ms = format!("{max:.2}"),
+                gaps,
+                "display frame arrivals"
+            );
+        }
+    }
+}
+
 struct Inner {
     display: gst::Pipeline,
     layer_a: LayerSlot,
@@ -184,7 +242,7 @@ pub struct MediaEngine {
 
 impl MediaEngine {
     /// Build and start the display pipeline (black output) with the default
-    /// 1080p30 canvas.
+    /// 720p30 canvas.
     pub fn new() -> Result<Self, MediaError> {
         Self::with_canvas(Canvas::default())
     }
@@ -216,7 +274,8 @@ impl MediaEngine {
         let out_convert = make("videoconvert", Some("out_convert"))?;
         let latest_frame: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
         let frame_notify: FrameNotify = Arc::new(Mutex::new(None));
-        let appsink = Self::make_display_sink(latest_frame.clone(), frame_notify.clone())?;
+        let appsink =
+            Self::make_display_sink(latest_frame.clone(), frame_notify.clone(), &canvas)?;
 
         display
             .add_many([&compositor, &comp_caps, &out_queue, &out_convert, &appsink])
@@ -262,6 +321,7 @@ impl MediaEngine {
     fn make_display_sink(
         latest: Arc<Mutex<Option<Vec<u8>>>>,
         notify: FrameNotify,
+        canvas: &Canvas,
     ) -> Result<gst::Element, MediaError> {
         if let Ok(name) = std::env::var("CUEMESH_VIDEO_SINK") {
             let name = name.trim();
@@ -293,6 +353,7 @@ impl MediaEngine {
             .clone()
             .dynamic_cast::<gst_app::AppSink>()
             .expect("appsink element cast to AppSink");
+        let mut stats = SinkStats::new(canvas);
         typed.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
@@ -303,6 +364,7 @@ impl MediaEngine {
                     if let Ok(mut guard) = latest.lock() {
                         *guard = Some(data);
                     }
+                    stats.tick();
                     if let Ok(guard) = notify.lock() {
                         if let Some(cb) = guard.as_ref() {
                             cb();
@@ -660,9 +722,13 @@ impl MediaEngine {
                 gst::ClockTime::NONE,
             );
             if instant.is_ok() {
+                tracing::debug!(?layer, rate, "set_rate: instant rate change");
                 return Ok(());
             }
-            tracing::debug!(?layer, rate, "instant rate change unsupported; flushing seek");
+            // Loud on purpose: if this fires repeatedly during playback, the
+            // demuxer rejected the instant path and every drift correction is
+            // a stutter-inducing flushing seek again.
+            tracing::warn!(?layer, rate, "set_rate: instant rate change REJECTED — falling back to flushing seek");
             let pos = p
                 .query_position::<gst::ClockTime>()
                 .unwrap_or(gst::ClockTime::ZERO);
