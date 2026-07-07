@@ -51,9 +51,24 @@
 | 2 | Protocol v2 (relative paths, SHOW_SYNC, crossfade PLAY_AT, media check/push, transfer framing) | ✅ done, tested |
 | 3 | Client: media root, crossfade handling, dropout policy, drift correction, testscreen, media check/receive | ✅ done, tested |
 | 4 | Controller: cue sequencing (layer alternation), GO/NEXT/PREV/BLACKOUT + spacebar, preflight+push UI, heartbeat staleness | ✅ done, tested |
-| 5 | Show editor UI (cue CRUD, reorder, save TOML, rfd file dialogs) | 🔨 next |
+| 5 | Show editor UI (cue CRUD, reorder, save TOML) | ✅ done, tested |
 | 6 | mDNS discovery (controller advertises, client browses + manual IP) | ✅ done, tested |
-| 7 | Tests + docs | 🔨 integration handshake + example show done; `docs/OPERATION.md` pending |
+| 7 | Tests + docs | ✅ integration handshake + example show + `docs/OPERATION.md` |
+
+**All seven planned tasks are complete.** Workspace: 38 tests green, clippy
+clean. See "Known gaps" for deliberately-deferred polish.
+
+### Task 5 — show editor (`crates/cuemesh2-controller/src/editor.rs`) ✅
+Editor mode in the controller. A String/primitive *draft* model binds to egui
+directly and converts to/from `ShowFile`. Show-settings form + cue table with
+per-row edit, move up/down, duplicate, delete, add. Cue files are picked from
+a recursive scan of the show's `media_root` (paths stay relative) with a
+free-text fallback. "Apply" pushes the draft into shared state + SHOW_SYNC;
+"Save to file" validates and writes TOML. **Chose not to add `rfd`**: its
+Linux backend links GTK, which conflicts with the "no system GTK/Qt dep"
+portability goal — a save-path text field + media-root scan is more portable
+and enforces the relative-path constraint for free. Tests: draft round-trip
+and cue reorder/dup/delete.
 
 ### Verification pass (after tasks 2–6, before committing)
 `cargo test --workspace` is green (36 tests) and `cargo clippy --workspace
