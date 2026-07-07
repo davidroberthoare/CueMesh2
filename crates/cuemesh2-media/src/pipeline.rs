@@ -691,11 +691,26 @@ impl MediaEngine {
             .is_some()
     }
 
-    /// Seek a layer to a position in ms.
+    /// Seek a layer to a position in ms (fast: snaps to the nearest keyframe,
+    /// so it can land up to a GOP away from the target).
     pub fn seek_ms(&self, layer: Layer, position_ms: u64) -> Result<(), MediaError> {
         self.with_producer(layer, |p| {
             p.seek_simple(
                 gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::ClockTime::from_mseconds(position_ms),
+            )
+            .map_err(|e| MediaError::StateChange(e.to_string()))
+        })?
+    }
+
+    /// Seek a layer to an exact position in ms. Decodes forward from the
+    /// previous keyframe, so it costs more than [`seek_ms`](Self::seek_ms) —
+    /// used for drift hard-resyncs, where a keyframe snap would leave the
+    /// layer as far out of sync as before the seek.
+    pub fn seek_ms_accurate(&self, layer: Layer, position_ms: u64) -> Result<(), MediaError> {
+        self.with_producer(layer, |p| {
+            p.seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
                 gst::ClockTime::from_mseconds(position_ms),
             )
             .map_err(|e| MediaError::StateChange(e.to_string()))

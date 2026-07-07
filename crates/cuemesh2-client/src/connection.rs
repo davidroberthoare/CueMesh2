@@ -410,12 +410,20 @@ fn spawn_status_loop(
                             let target = (expected.max(0) as u64)
                                 .min(duration.saturating_sub(SEEK_MARGIN_MS));
                             tracing::info!(?wire, drift, target, "hard seek to correct drift");
-                            let _ = engine.seek_ms(ml, target);
-                            let _ = engine.set_rate(ml, 1.0);
-                            applied_rate.insert(wire, 1.0);
-                            // Reset the plateau detector — the seek might have
-                            // moved us to fresh media that will start advancing.
-                            ds.prev_actual = Some(target);
+                            // Accurate, not keyframe-snapped: a KEY_UNIT seek
+                            // can land a whole GOP short of the target, which
+                            // the plateau detector then reads as "position
+                            // regressed → clip ended" and sync goes dead for
+                            // the rest of the cue.
+                            let _ = engine.seek_ms_accurate(ml, target);
+                            if applied_rate.get(&wire).copied().unwrap_or(1.0) != 1.0 {
+                                let _ = engine.set_rate(ml, 1.0);
+                                applied_rate.insert(wire, 1.0);
+                            }
+                            // Reset the plateau detector without assuming the
+                            // seek landed exactly on target — let the next
+                            // tick observe the real position fresh.
+                            ds.prev_actual = None;
                             ds.stagnant_ticks = 0;
                         }
                     }
