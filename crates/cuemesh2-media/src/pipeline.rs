@@ -35,6 +35,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_app as gst_app;
 use tokio::sync::broadcast;
 
 use cuemesh2_shared::protocol::Layer;
@@ -166,6 +167,8 @@ struct Inner {
     layer_b: LayerSlot,
     canvas: Canvas,
     events_tx: broadcast::Sender<MediaEvent>,
+    /// Latest composited frame in RGBA format, for the egui texture path.
+    latest_frame: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 /// Two-layer video engine. Clone is cheap (Arc-shared).
@@ -206,12 +209,13 @@ impl MediaEngine {
         );
         let out_queue = make("queue", Some("out_queue"))?;
         let out_convert = make("videoconvert", Some("out_convert"))?;
-        let video_sink = Self::make_video_sink()?;
+        let latest_frame: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let appsink = Self::make_display_sink(latest_frame.clone())?;
 
         display
-            .add_many([&compositor, &comp_caps, &out_queue, &out_convert, &video_sink])
+            .add_many([&compositor, &comp_caps, &out_queue, &out_convert, &appsink])
             .map_err(|e| MediaError::AddMany(e.to_string()))?;
-        gst::Element::link_many([&compositor, &comp_caps, &out_queue, &out_convert, &video_sink])
+        gst::Element::link_many([&compositor, &comp_caps, &out_queue, &out_convert, &appsink])
             .map_err(|e| MediaError::LinkElements(e.to_string()))?;
 
         let layer_a = Self::build_display_input(&display, &compositor, &canvas, Layer::A, 0)?;
@@ -229,6 +233,7 @@ impl MediaEngine {
                 layer_b,
                 canvas,
                 events_tx,
+                latest_frame,
             }),
         };
 
@@ -241,19 +246,13 @@ impl MediaEngine {
         Ok(engine)
     }
 
-    /// Pick the video sink for the compositor output window.
+    /// Create the display pipeline's sink element.
     ///
-    /// On Linux we deliberately prefer the non-GL `xvimagesink` (XVideo,
-    /// hardware scaling) over `glimagesink`. The client hosts an `eframe`
-    /// (glow) GL context on its main thread; `glimagesink` spins up a second
-    /// GLX context on a GStreamer thread, and two GLX contexts sharing one X
-    /// display fight each other — the video window ends up mapped but frozen
-    /// (visible in the taskbar, unresponsive, never raising). `xvimagesink`
-    /// has no GL context, so it coexists cleanly. The standalone media
-    /// examples have no eframe context and can still use GL fine.
-    ///
-    /// Override the whole decision with `CUEMESH_VIDEO_SINK=<factory>`.
-    fn make_video_sink() -> Result<gst::Element, MediaError> {
+    /// Default: an `appsink` that delivers RGBA frames into `latest_frame`
+    /// for embedding in the eframe window. Override with
+    /// `CUEMESH_VIDEO_SINK=<factory>` to get a real video window (useful
+    /// for the standalone media examples and for debugging).
+    fn make_display_sink(latest: Arc<Mutex<Option<Vec<u8>>>>) -> Result<gst::Element, MediaError> {
         if let Ok(name) = std::env::var("CUEMESH_VIDEO_SINK") {
             let name = name.trim();
             let sink = gst::ElementFactory::make(name)
@@ -262,35 +261,45 @@ impl MediaEngine {
                 .map_err(|_| {
                     MediaError::ElementFactory(format!("CUEMESH_VIDEO_SINK '{name}' unavailable"))
                 })?;
-            tracing::info!(factory = %name, "video sink selected (env override)");
-            Self::configure_video_sink(&sink);
+            tracing::info!(factory = %name, "display sink (env override)");
             return Ok(sink);
         }
 
-        let candidates: &[&str] = if cfg!(target_os = "windows") {
-            &["d3d11videosink", "glimagesink", "autovideosink"]
-        } else if cfg!(target_os = "macos") {
-            &["glimagesink", "osxvideosink", "autovideosink"]
-        } else {
-            &["xvimagesink", "glimagesink", "ximagesink", "autovideosink"]
-        };
-        for factory in candidates {
-            if let Ok(sink) = gst::ElementFactory::make(factory).name("vsink").build() {
-                tracing::info!(%factory, "video sink selected");
-                Self::configure_video_sink(&sink);
-                return Ok(sink);
-            }
-        }
-        Err(MediaError::ElementFactory("no usable video sink".into()))
-    }
+        let sink = gst::ElementFactory::make("appsink")
+            .name("vsink")
+            .property("max-buffers", 2u32)
+            .property("drop", true) // drop old frames if egui is lagging
+            .property("sync", false) // don't wait on clock; egui drives timing
+            .build()
+            .map_err(|_| MediaError::ElementFactory("appsink".into()))?;
 
-    /// Apply properties common to every sink we might pick, guarding each one
-    /// since not all sinks expose all of them.
-    fn configure_video_sink(sink: &gst::Element) {
-        // Letterbox instead of stretching the 16:9 canvas to the window.
-        if sink.find_property("force-aspect-ratio").is_some() {
-            sink.set_property("force-aspect-ratio", true);
-        }
+        // Ask for RGBA so egui can upload the frame directly.
+        let caps = gst::Caps::builder("video/x-raw")
+            .field("format", "RGBA")
+            .build();
+        sink.set_property("caps", &caps);
+
+        let typed = sink
+            .clone()
+            .dynamic_cast::<gst_app::AppSink>()
+            .expect("appsink element cast to AppSink");
+        typed.set_callbacks(
+            gst_app::AppSinkCallbacks::builder()
+                .new_sample(move |sink| {
+                    let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                    let data = map.as_slice().to_vec();
+                    if let Ok(mut guard) = latest.lock() {
+                        *guard = Some(data);
+                    }
+                    Ok(gst::FlowSuccess::Ok)
+                })
+                .build(),
+        );
+
+        tracing::info!("display sink: appsink (RGBA, max-buffers=2, drop)");
+        Ok(sink)
     }
 
     /// One display-side input branch: intervideosrc → caps → queue → comp pad.
@@ -661,6 +670,21 @@ impl MediaEngine {
         self.slot(layer).compositor_pad.property::<f64>("alpha")
     }
 
+    /// The output canvas (resolution, framerate) this engine was built with.
+    pub fn canvas(&self) -> Canvas {
+        self.inner.canvas
+    }
+
+    /// Take the latest composited frame as RGBA bytes, if any.
+    /// Returns `None` if no frame has been produced yet.
+    pub fn latest_frame(&self) -> Option<Vec<u8>> {
+        self.inner
+            .latest_frame
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+    }
+
     fn abort_fade(&self, layer: Layer) {
         let slot = self.slot(layer);
         if let Ok(mut guard) = slot.fade.lock() {
@@ -820,3 +844,5 @@ mod tests {
         assert!(!engine.is_loaded(Layer::A));
     }
 }
+
+

@@ -71,12 +71,13 @@ fn main() -> anyhow::Result<()> {
     });
 
     let ui_state = state.clone();
+    let ui_engine = engine.clone();
     let _rt_guard = rt.enter();
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
         "CueMesh2 Client",
         native_options,
-        Box::new(move |_cc| Ok(Box::new(ui::ClientApp::new(ui_state)))),
+        Box::new(move |_cc| Ok(Box::new(ui::ClientApp::new(ui_state, ui_engine)))),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))?;
     Ok(())

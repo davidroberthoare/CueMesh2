@@ -33,6 +33,23 @@ use crate::state::{PlaybackState, SharedState};
 /// media rather than triggering EOS.
 const SEEK_MARGIN_MS: u64 = 250;
 
+/// If a layer's position doesn't increase by at least this much over one
+/// second while the controller expects it to, the clip has ended (or is stuck)
+/// and drift correction should back off.
+const PLATEAU_THRESHOLD_MS: u64 = 100;
+
+/// Per-layer state for the plateau detector.
+#[derive(Default)]
+struct DriftState {
+    prev_actual: Option<u64>,
+    /// Ticks where the position hasn't advanced past PLATEAU_THRESHOLD.
+    stagnant_ticks: u32,
+    /// Once detected, skip this layer until a new PLAY_AT.
+    ended: bool,
+    /// When master_start_utc_ms changes we know it's a fresh cue.
+    prev_master_start: Option<u64>,
+}
+
 pub struct ConnectionConfig {
     pub controller_url: String,
     pub client_id: String,
@@ -236,6 +253,9 @@ fn spawn_status_loop(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Rate currently applied per layer, to avoid re-seeking every tick.
         let mut applied_rate: HashMap<WireLayer, f64> = HashMap::new();
+        // Per-layer plateau detector (end-of-media fallback when duration is
+        // unreliable after a flush seek).
+        let mut drift_state: HashMap<WireLayer, DriftState> = HashMap::new();
         loop {
             interval.tick().await;
 
@@ -268,6 +288,54 @@ fn spawn_status_loop(
                     };
                     let ml = media_layer(wire);
                     let Some(actual) = engine.position_ms(ml) else { continue };
+
+                    // Plateau detector: if the position has stopped advancing
+                    // while the controller expects it to, the clip has ended.
+                    let ds = drift_state.entry(wire).or_default();
+                    // Reset when a new PLAY_AT (new master_start_utc_ms)
+                    // gives us a fresh cue to track.
+                    if ds.prev_master_start != Some(start) {
+                        *ds = DriftState::default();
+                        ds.prev_master_start = Some(start);
+                    }
+                    if ds.ended {
+                        continue;
+                    }
+                    if let Some(prev) = ds.prev_actual {
+                        // Position went backwards after a seek — the clip has
+                        // ended (seek past EOS reset to keyframe at 0).
+                        if actual < prev {
+                            tracing::info!(
+                                ?wire,
+                                prev,
+                                actual,
+                                "drift: position regressed after seek — clip ended"
+                            );
+                            ds.ended = true;
+                            continue;
+                        }
+                        // Much less progress than expected means we're stuck
+                        // near the end of the clip (appsink throttled or
+                        // decoder hit the final keyframe).
+                        if actual < prev + PLATEAU_THRESHOLD_MS {
+                            ds.stagnant_ticks += 1;
+                            if ds.stagnant_ticks >= 2 {
+                                tracing::info!(
+                                    ?wire,
+                                    prev,
+                                    actual,
+                                    stagnant = ds.stagnant_ticks,
+                                    "drift: layer appears ended — disabling correction"
+                                );
+                                ds.ended = true;
+                                continue;
+                            }
+                        } else {
+                            ds.stagnant_ticks = 0;
+                        }
+                    }
+                    ds.prev_actual = Some(actual);
+
                     // A clip with no seekable timeline (a still image via
                     // imagefreeze) or whose duration isn't known yet can't be
                     // meaningfully synced — don't touch it.
@@ -329,6 +397,10 @@ fn spawn_status_loop(
                             let _ = engine.seek_ms(ml, target);
                             let _ = engine.set_rate(ml, 1.0);
                             applied_rate.insert(wire, 1.0);
+                            // Reset the plateau detector — the seek might have
+                            // moved us to fresh media that will start advancing.
+                            ds.prev_actual = Some(target);
+                            ds.stagnant_ticks = 0;
                         }
                     }
                 }

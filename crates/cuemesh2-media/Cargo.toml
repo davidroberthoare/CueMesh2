@@ -11,10 +11,13 @@ description = "GStreamer-backed two-layer video compositor pipeline for CueMesh2
 cuemesh2-shared = { workspace = true }
 gstreamer = { workspace = true }
 gstreamer-video = { workspace = true }
+gstreamer-app = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+
+
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
