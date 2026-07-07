@@ -32,6 +32,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -93,9 +94,14 @@ pub struct Canvas {
 
 impl Default for Canvas {
     fn default() -> Self {
+        // 720p: theatre projection is viewed at a distance, so resolution
+        // matters less than per-frame cost — a 1080p canvas more than doubles
+        // the software convert + texture upload for no visible benefit, and
+        // upscales what is typically 720p source media. Shows that want 1080p
+        // can pass an explicit canvas (client: CUEMESH_CANVAS=1920x1080@30).
         Self {
-            width: 1920,
-            height: 1080,
+            width: 1280,
+            height: 720,
             fps_n: 30,
             fps_d: 1,
         }
@@ -161,6 +167,62 @@ struct LayerSlot {
     fade: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
+/// Callback invoked from the appsink thread whenever a new composited frame
+/// lands, so the UI can repaint on frame arrival instead of polling.
+type FrameNotify = Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>;
+
+/// Frame-arrival interval tracker for the display sink. Logs a summary every
+/// few seconds so hitches show up as numbers (gaps ≫ the frame interval)
+/// instead of guesswork. Mirrors the stats the playback-spike bench prints.
+struct SinkStats {
+    expected_ms: f64,
+    last: Option<Instant>,
+    deltas_ms: Vec<f64>,
+    last_report: Instant,
+}
+
+impl SinkStats {
+    fn new(canvas: &Canvas) -> Self {
+        Self {
+            expected_ms: 1000.0 * canvas.fps_d.max(1) as f64 / canvas.fps_n.max(1) as f64,
+            last: None,
+            deltas_ms: Vec::with_capacity(256),
+            last_report: Instant::now(),
+        }
+    }
+
+    fn tick(&mut self) {
+        let now = Instant::now();
+        if let Some(prev) = self.last {
+            self.deltas_ms.push(now.duration_since(prev).as_secs_f64() * 1000.0);
+        }
+        self.last = Some(now);
+
+        if now.duration_since(self.last_report).as_secs() >= 5 && !self.deltas_ms.is_empty() {
+            self.last_report = now;
+            let mut d = std::mem::take(&mut self.deltas_ms);
+            d.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = d.len();
+            let avg = d.iter().sum::<f64>() / n as f64;
+            let p95 = d[((n as f64 * 0.95) as usize).min(n - 1)];
+            let max = d[n - 1];
+            // A "gap" is a missing frame slot: the sink went silent for at
+            // least half an extra frame interval.
+            let gaps = d.iter().filter(|&&v| v > self.expected_ms * 1.5).count();
+            tracing::info!(
+                target: "cuemesh2_media::framestats",
+                n,
+                fps = format!("{:.2}", 1000.0 / avg),
+                avg_ms = format!("{avg:.2}"),
+                p95_ms = format!("{p95:.2}"),
+                max_ms = format!("{max:.2}"),
+                gaps,
+                "display frame arrivals"
+            );
+        }
+    }
+}
+
 struct Inner {
     display: gst::Pipeline,
     layer_a: LayerSlot,
@@ -169,6 +231,7 @@ struct Inner {
     events_tx: broadcast::Sender<MediaEvent>,
     /// Latest composited frame in RGBA format, for the egui texture path.
     latest_frame: Arc<Mutex<Option<Vec<u8>>>>,
+    frame_notify: FrameNotify,
 }
 
 /// Two-layer video engine. Clone is cheap (Arc-shared).
@@ -179,7 +242,7 @@ pub struct MediaEngine {
 
 impl MediaEngine {
     /// Build and start the display pipeline (black output) with the default
-    /// 1080p30 canvas.
+    /// 720p30 canvas.
     pub fn new() -> Result<Self, MediaError> {
         Self::with_canvas(Canvas::default())
     }
@@ -210,7 +273,9 @@ impl MediaEngine {
         let out_queue = make("queue", Some("out_queue"))?;
         let out_convert = make("videoconvert", Some("out_convert"))?;
         let latest_frame: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
-        let appsink = Self::make_display_sink(latest_frame.clone())?;
+        let frame_notify: FrameNotify = Arc::new(Mutex::new(None));
+        let appsink =
+            Self::make_display_sink(latest_frame.clone(), frame_notify.clone(), &canvas)?;
 
         display
             .add_many([&compositor, &comp_caps, &out_queue, &out_convert, &appsink])
@@ -234,6 +299,7 @@ impl MediaEngine {
                 canvas,
                 events_tx,
                 latest_frame,
+                frame_notify,
             }),
         };
 
@@ -252,7 +318,11 @@ impl MediaEngine {
     /// for embedding in the eframe window. Override with
     /// `CUEMESH_VIDEO_SINK=<factory>` to get a real video window (useful
     /// for the standalone media examples and for debugging).
-    fn make_display_sink(latest: Arc<Mutex<Option<Vec<u8>>>>) -> Result<gst::Element, MediaError> {
+    fn make_display_sink(
+        latest: Arc<Mutex<Option<Vec<u8>>>>,
+        notify: FrameNotify,
+        canvas: &Canvas,
+    ) -> Result<gst::Element, MediaError> {
         if let Ok(name) = std::env::var("CUEMESH_VIDEO_SINK") {
             let name = name.trim();
             let sink = gst::ElementFactory::make(name)
@@ -269,7 +339,7 @@ impl MediaEngine {
             .name("vsink")
             .property("max-buffers", 2u32)
             .property("drop", true) // drop old frames if egui is lagging
-            .property("sync", false) // don't wait on clock; egui drives timing
+            .property("sync", true) // pipeline clock paces frame delivery
             .build()
             .map_err(|_| MediaError::ElementFactory("appsink".into()))?;
 
@@ -283,6 +353,7 @@ impl MediaEngine {
             .clone()
             .dynamic_cast::<gst_app::AppSink>()
             .expect("appsink element cast to AppSink");
+        let mut stats = SinkStats::new(canvas);
         typed.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
@@ -293,13 +364,29 @@ impl MediaEngine {
                     if let Ok(mut guard) = latest.lock() {
                         *guard = Some(data);
                     }
+                    stats.tick();
+                    if let Ok(guard) = notify.lock() {
+                        if let Some(cb) = guard.as_ref() {
+                            cb();
+                        }
+                    }
                     Ok(gst::FlowSuccess::Ok)
                 })
                 .build(),
         );
 
-        tracing::info!("display sink: appsink (RGBA, max-buffers=2, drop)");
+        tracing::info!("display sink: appsink (RGBA, sync, max-buffers=2, drop)");
         Ok(sink)
+    }
+
+    /// Register a callback fired from the sink thread on every new composited
+    /// frame. The UI uses this to request a repaint exactly when a frame
+    /// lands, instead of polling on a timer that beats against the video
+    /// cadence. Keep the callback cheap and non-blocking.
+    pub fn set_frame_notify(&self, cb: impl Fn() + Send + Sync + 'static) {
+        if let Ok(mut guard) = self.inner.frame_notify.lock() {
+            *guard = Some(Box::new(cb));
+        }
     }
 
     /// One display-side input branch: intervideosrc → caps → queue → comp pad.
@@ -604,7 +691,8 @@ impl MediaEngine {
             .is_some()
     }
 
-    /// Seek a layer to a position in ms.
+    /// Seek a layer to a position in ms (fast: snaps to the nearest keyframe,
+    /// so it can land up to a GOP away from the target).
     pub fn seek_ms(&self, layer: Layer, position_ms: u64) -> Result<(), MediaError> {
         self.with_producer(layer, |p| {
             p.seek_simple(
@@ -615,13 +703,47 @@ impl MediaEngine {
         })?
     }
 
-    /// Adjust playback rate on a layer via a non-flushing position-preserving
-    /// seek. Used sparingly by drift correction.
+    /// Seek a layer to an exact position in ms. Decodes forward from the
+    /// previous keyframe, so it costs more than [`seek_ms`](Self::seek_ms) —
+    /// used for drift hard-resyncs, where a keyframe snap would leave the
+    /// layer as far out of sync as before the seek.
+    pub fn seek_ms_accurate(&self, layer: Layer, position_ms: u64) -> Result<(), MediaError> {
+        self.with_producer(layer, |p| {
+            p.seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                gst::ClockTime::from_mseconds(position_ms),
+            )
+            .map_err(|e| MediaError::StateChange(e.to_string()))
+        })?
+    }
+
+    /// Adjust playback rate on a layer. Used by drift correction every few
+    /// seconds, so it must not disturb playback: a flushing seek stalls the
+    /// layer while the decoder re-decodes from the previous keyframe, which
+    /// shows up as a visible hitch. Prefer GStreamer's instant-rate-change
+    /// seek (≥1.18, no flush, no re-decode) and only fall back to the
+    /// flushing seek for demuxers that don't support it.
     pub fn set_rate(&self, layer: Layer, rate: f64) -> Result<(), MediaError> {
         if rate <= 0.0 {
             return Ok(());
         }
         self.with_producer(layer, |p| {
+            let instant = p.seek(
+                rate,
+                gst::SeekFlags::INSTANT_RATE_CHANGE,
+                gst::SeekType::None,
+                gst::ClockTime::NONE,
+                gst::SeekType::None,
+                gst::ClockTime::NONE,
+            );
+            if instant.is_ok() {
+                tracing::debug!(?layer, rate, "set_rate: instant rate change");
+                return Ok(());
+            }
+            // Loud on purpose: if this fires repeatedly during playback, the
+            // demuxer rejected the instant path and every drift correction is
+            // a stutter-inducing flushing seek again.
+            tracing::warn!(?layer, rate, "set_rate: instant rate change REJECTED — falling back to flushing seek");
             let pos = p
                 .query_position::<gst::ClockTime>()
                 .unwrap_or(gst::ClockTime::ZERO);

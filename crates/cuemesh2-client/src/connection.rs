@@ -251,6 +251,15 @@ fn spawn_status_loop(
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(1000));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Debug kill switch: CUEMESH_DRIFT=off measures and reports drift but
+        // never touches playback, to isolate the corrector when hunting
+        // smoothness problems.
+        let corrections_enabled = std::env::var("CUEMESH_DRIFT")
+            .map(|v| !v.eq_ignore_ascii_case("off"))
+            .unwrap_or(true);
+        if !corrections_enabled {
+            tracing::warn!("CUEMESH_DRIFT=off — drift is reported but never corrected");
+        }
         // Rate currently applied per layer, to avoid re-seeking every tick.
         let mut applied_rate: HashMap<WireLayer, f64> = HashMap::new();
         // Per-layer plateau detector (end-of-media fallback when duration is
@@ -369,24 +378,31 @@ fn spawn_status_loop(
                             sample_count: 0,
                         }))
                         .await;
+                    if !corrections_enabled {
+                        continue;
+                    }
                     match correction_for(drift, &params) {
                         Correction::Hold => {
                             // Ease back to nominal speed once we're close.
                             if applied_rate.get(&wire).copied().unwrap_or(1.0) != 1.0
                                 && drift.abs() < 10
                             {
+                                tracing::info!(?wire, drift, "drift: easing rate back to 1.0");
                                 let _ = engine.set_rate(ml, 1.0);
                                 applied_rate.insert(wire, 1.0);
                             }
                         }
                         Correction::Rate(rate) => {
-                            // Only re-seek when meaningfully different; a rate
-                            // change is a flushing seek and not free.
+                            // Only re-apply when meaningfully different, so a
+                            // drift wobble around the deadband doesn't toggle
+                            // the rate every tick.
                             let cur = applied_rate.get(&wire).copied().unwrap_or(1.0);
-                            if drift.abs() > 25 && (rate as f64 - cur).abs() > 0.005
-                                && engine.set_rate(ml, rate as f64).is_ok() {
+                            if drift.abs() > 25 && (rate as f64 - cur).abs() > 0.005 {
+                                tracing::info!(?wire, drift, rate, "drift: applying rate correction");
+                                if engine.set_rate(ml, rate as f64).is_ok() {
                                     applied_rate.insert(wire, rate as f64);
                                 }
+                            }
                         }
                         Correction::HardSeek(_) => {
                             // Never seek past the end (guarded above, but clamp
@@ -394,12 +410,20 @@ fn spawn_status_loop(
                             let target = (expected.max(0) as u64)
                                 .min(duration.saturating_sub(SEEK_MARGIN_MS));
                             tracing::info!(?wire, drift, target, "hard seek to correct drift");
-                            let _ = engine.seek_ms(ml, target);
-                            let _ = engine.set_rate(ml, 1.0);
-                            applied_rate.insert(wire, 1.0);
-                            // Reset the plateau detector — the seek might have
-                            // moved us to fresh media that will start advancing.
-                            ds.prev_actual = Some(target);
+                            // Accurate, not keyframe-snapped: a KEY_UNIT seek
+                            // can land a whole GOP short of the target, which
+                            // the plateau detector then reads as "position
+                            // regressed → clip ended" and sync goes dead for
+                            // the rest of the cue.
+                            let _ = engine.seek_ms_accurate(ml, target);
+                            if applied_rate.get(&wire).copied().unwrap_or(1.0) != 1.0 {
+                                let _ = engine.set_rate(ml, 1.0);
+                                applied_rate.insert(wire, 1.0);
+                            }
+                            // Reset the plateau detector without assuming the
+                            // seek landed exactly on target — let the next
+                            // tick observe the real position fresh.
+                            ds.prev_actual = None;
                             ds.stagnant_ticks = 0;
                         }
                     }

@@ -9,11 +9,27 @@
 //!   `CUEMESH_NAME`       — human-readable client name (default hostname)
 //!   `CUEMESH_MEDIA_ROOT` — where this client's media lives
 //!                          (default `~/cuemesh_media`)
+//!   `CUEMESH_CANVAS`     — output canvas as `WxH@FPS`, e.g. `1280x720@30`
+//!                          (default 1920x1080@30)
+//!   `CUEMESH_DRIFT`      — set to `off` to report but never correct drift
+//!                          (debugging aid for playback smoothness)
 //!
 //! See `CLAUDE.md` at the workspace root for the design brief.
 
 use cuemesh2_client::{connection, discovery, state, ui};
-use cuemesh2_media::MediaEngine;
+use cuemesh2_media::{Canvas, MediaEngine};
+
+/// Parse `WxH@FPS` (e.g. `1280x720@30`); None on any malformed part.
+fn parse_canvas(spec: &str) -> Option<Canvas> {
+    let (size, fps) = spec.split_once('@')?;
+    let (w, h) = size.split_once('x')?;
+    Some(Canvas {
+        width: w.trim().parse().ok()?,
+        height: h.trim().parse().ok()?,
+        fps_n: fps.trim().parse().ok()?,
+        fps_d: 1,
+    })
+}
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -38,7 +54,14 @@ fn main() -> anyhow::Result<()> {
                 .join("cuemesh_media")
         });
 
-    let engine = MediaEngine::new()?;
+    let engine = match std::env::var("CUEMESH_CANVAS").ok().as_deref().map(parse_canvas) {
+        Some(Some(canvas)) => {
+            tracing::info!(?canvas, "canvas from CUEMESH_CANVAS");
+            MediaEngine::with_canvas(canvas)?
+        }
+        Some(None) => anyhow::bail!("CUEMESH_CANVAS must look like 1280x720@30"),
+        None => MediaEngine::new()?,
+    };
     let state = state::shared();
     {
         let mut s = state.lock().unwrap();
@@ -77,7 +100,13 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "CueMesh2 Client",
         native_options,
-        Box::new(move |_cc| Ok(Box::new(ui::ClientApp::new(ui_state, ui_engine)))),
+        Box::new(move |cc| {
+            // Repaint exactly when a composited frame lands, so presentation
+            // follows the pipeline clock instead of a polling timer.
+            let repaint_ctx = cc.egui_ctx.clone();
+            ui_engine.set_frame_notify(move || repaint_ctx.request_repaint());
+            Ok(Box::new(ui::ClientApp::new(ui_state, ui_engine)))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))?;
     Ok(())
