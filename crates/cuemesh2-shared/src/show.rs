@@ -8,6 +8,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Duration (ms) used by the operator BLACKOUT command and the `black` dropout
+/// policy. Formerly a per-show setting; now a fixed default — per-cue colour
+/// cues cover deliberate fades to black/white.
+pub const DEFAULT_FADE_MS: u32 = 1500;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ShowError {
     #[error("failed to read show file: {0}")]
@@ -41,8 +46,6 @@ pub struct Show {
     pub dropout_policy: DropoutPolicy,
     #[serde(default)]
     pub sync: SyncConfig,
-    #[serde(default)]
-    pub settings: ShowSettings,
 }
 
 /// What a client should do if it loses its controller mid-cue.
@@ -95,34 +98,22 @@ impl Default for SyncCorrection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShowSettings {
-    /// Duration used by the operator FADE command to fade all layers to black.
-    pub default_fade_ms: u32,
-}
-
-impl Default for ShowSettings {
-    fn default() -> Self {
-        Self {
-            default_fade_ms: 1500,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cue {
     pub id: String,
     pub name: String,
     #[serde(rename = "type")]
     pub kind: CueKind,
+    /// Media file, relative to `media_root`. Empty for `color` cues.
+    #[serde(default)]
     pub file: PathBuf,
+    /// Solid colour for `color` cues, as `#RRGGBB`. Ignored otherwise.
+    #[serde(default)]
+    pub color: Option<String>,
+    /// Fade time. When nothing is on air this is the fade-from-black duration;
+    /// when a cue is already playing it is the crossfade duration into this
+    /// cue. `0` means a hard cut.
     #[serde(default)]
     pub fade_in_ms: u32,
-    #[serde(default)]
-    pub fade_out_ms: u32,
-    /// If > 0, the client auto-preloads the following cue on the idle layer
-    /// once fades on that layer complete, then crossfades on cue end.
-    #[serde(default)]
-    pub crossfade_to_next_ms: u32,
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -132,6 +123,25 @@ pub struct Cue {
 pub enum CueKind {
     Video,
     Image,
+    /// A solid colour (see [`Cue::color`]) — used for fades to black/white.
+    Color,
+}
+
+/// Parse a `#RRGGBB` string into an `[r, g, b]` triple. Returns black on any
+/// malformed input so a bad colour never breaks playback.
+pub fn parse_hex_color(s: &str) -> [u8; 3] {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() == 6 {
+        if let Ok(v) = u32::from_str_radix(h, 16) {
+            return [(v >> 16) as u8, (v >> 8) as u8, v as u8];
+        }
+    }
+    [0, 0, 0]
+}
+
+/// Format an `[r, g, b]` triple as `#RRGGBB`.
+pub fn format_hex_color(rgb: [u8; 3]) -> String {
+    format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])
 }
 
 impl ShowFile {
@@ -160,7 +170,6 @@ impl ShowFile {
                 media_root: PathBuf::from("~/cuemesh_media"),
                 dropout_policy: DropoutPolicy::default(),
                 sync: SyncConfig::default(),
-                settings: ShowSettings::default(),
             },
             cues: Vec::new(),
         }
@@ -188,28 +197,36 @@ impl ShowFile {
             if !seen.insert(cue.id.as_str()) {
                 return Err(ShowError::DuplicateCueId(cue.id.clone()));
             }
-            if cue.file.as_os_str().is_empty() {
-                return Err(ShowError::InvalidCue {
-                    cue_id: cue.id.clone(),
-                    problem: "file must not be empty".into(),
-                });
-            }
-            if cue.file.is_absolute() {
-                return Err(ShowError::InvalidCue {
-                    cue_id: cue.id.clone(),
-                    problem: format!(
-                        "file must be relative to media_root, got {}",
-                        cue.file.display()
-                    ),
-                });
+            // Colour cues carry no media file; every other kind needs a
+            // relative path.
+            if cue.kind != CueKind::Color {
+                if cue.file.as_os_str().is_empty() {
+                    return Err(ShowError::InvalidCue {
+                        cue_id: cue.id.clone(),
+                        problem: "file must not be empty".into(),
+                    });
+                }
+                if cue.file.is_absolute() {
+                    return Err(ShowError::InvalidCue {
+                        cue_id: cue.id.clone(),
+                        problem: format!(
+                            "file must be relative to media_root, got {}",
+                            cue.file.display()
+                        ),
+                    });
+                }
             }
         }
         Ok(())
     }
 
-    /// Check that every cue's file exists under the (already-expanded) media_root.
+    /// Check that every media cue's file exists under the (already-expanded)
+    /// media_root. Colour cues have no file and are skipped.
     pub fn validate_media(&self, media_root: &Path) -> Result<(), ShowError> {
         for cue in &self.cues {
+            if cue.kind == CueKind::Color {
+                continue;
+            }
             let full = media_root.join(&cue.file);
             if !full.exists() {
                 return Err(ShowError::MediaMissing {
@@ -240,14 +257,12 @@ title = "T"
 version = 1
 media_root = "/tmp/media"
 
-[show.settings]
-default_fade_ms = 1500
-
 [[cues]]
 id = "a"
 name = "A"
 type = "video"
 file = "a.mp4"
+fade_in_ms = 500
 
 [[cues]]
 id = "b"
@@ -260,12 +275,12 @@ crossfade_to_next_ms = 500
 
     #[test]
     fn parses_example() {
-        // Note: `volume` is a legacy key old show files may carry; it must
-        // be silently ignored, not rejected.
+        // Note: `volume` and `crossfade_to_next_ms` are legacy keys old show
+        // files may carry; they must be silently ignored, not rejected.
         let s = ShowFile::parse_str(EXAMPLE).unwrap();
         assert_eq!(s.show.title, "T");
         assert_eq!(s.cues.len(), 2);
-        assert_eq!(s.cues[1].crossfade_to_next_ms, 500);
+        assert_eq!(s.cues[0].fade_in_ms, 500);
         assert_eq!(s.show.dropout_policy, DropoutPolicy::Continue);
         assert_eq!(s.show.sync.max_drift_ms, 150);
     }
@@ -278,18 +293,28 @@ crossfade_to_next_ms = 500
             name: "First".into(),
             kind: CueKind::Video,
             file: PathBuf::from("a.mp4"),
+            color: None,
             fade_in_ms: 250,
-            fade_out_ms: 0,
-            crossfade_to_next_ms: 1000,
             notes: Some("hello".into()),
+        });
+        sf.cues.push(Cue {
+            id: "c2".into(),
+            name: "To black".into(),
+            kind: CueKind::Color,
+            file: PathBuf::new(),
+            color: Some("#000000".into()),
+            fade_in_ms: 1000,
+            notes: None,
         });
         let tmp = std::env::temp_dir().join("cuemesh2_show_roundtrip.cuemesh.toml");
         sf.save(&tmp).unwrap();
         let back = ShowFile::load(&tmp).unwrap();
         assert_eq!(back.show.title, "Roundtrip");
-        assert_eq!(back.cues.len(), 1);
-        assert_eq!(back.cues[0].crossfade_to_next_ms, 1000);
+        assert_eq!(back.cues.len(), 2);
+        assert_eq!(back.cues[0].fade_in_ms, 250);
         assert_eq!(back.cues[0].notes.as_deref(), Some("hello"));
+        assert_eq!(back.cues[1].kind, CueKind::Color);
+        assert_eq!(back.cues[1].color.as_deref(), Some("#000000"));
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -301,12 +326,35 @@ crossfade_to_next_ms = 500
             name: "Bad".into(),
             kind: CueKind::Video,
             file: PathBuf::from("/etc/passwd"),
+            color: None,
             fade_in_ms: 0,
-            fade_out_ms: 0,
-            crossfade_to_next_ms: 0,
             notes: None,
         });
         assert!(matches!(sf.validate(), Err(ShowError::InvalidCue { .. })));
+    }
+
+    #[test]
+    fn color_cue_needs_no_file() {
+        let mut sf = ShowFile::new_empty("T");
+        sf.cues.push(Cue {
+            id: "black".into(),
+            name: "Blackout".into(),
+            kind: CueKind::Color,
+            file: PathBuf::new(),
+            color: Some("#000000".into()),
+            fade_in_ms: 1500,
+            notes: None,
+        });
+        sf.validate().unwrap();
+        // Media validation skips colour cues even with a bogus root.
+        sf.validate_media(Path::new("/nonexistent")).unwrap();
+    }
+
+    #[test]
+    fn hex_color_roundtrip() {
+        assert_eq!(parse_hex_color("#FF8000"), [255, 128, 0]);
+        assert_eq!(parse_hex_color("bad"), [0, 0, 0]);
+        assert_eq!(format_hex_color([255, 128, 0]), "#FF8000");
     }
 
     #[test]

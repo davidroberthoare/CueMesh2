@@ -48,7 +48,14 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "CueMesh2 Controller",
         native_options,
-        Box::new(move |_cc| Ok(Box::new(ui::ControllerApp::new(ui_state)))),
+        Box::new(move |cc| {
+            // egui's default fonts have no symbol glyphs; install Phosphor so
+            // the toolbar/table icons render.
+            let mut fonts = egui::FontDefinitions::default();
+            egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+            cc.egui_ctx.set_fonts(fonts);
+            Ok(Box::new(ui::ControllerApp::new(ui_state)))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))?;
 

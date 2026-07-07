@@ -96,7 +96,14 @@ fn main() -> anyhow::Result<()> {
     let ui_state = state.clone();
     let ui_engine = engine.clone();
     let _rt_guard = rt.enter();
-    let native_options = eframe::NativeOptions::default();
+    let native_options = eframe::NativeOptions {
+        // Chromeless: no OS title bar / min-max-close buttons — the window is
+        // just the canvas. Still resizable (drag edges / WM shortcuts).
+        viewport: egui::ViewportBuilder::default()
+            .with_title("CueMesh2 Client")
+            .with_decorations(false),
+        ..Default::default()
+    };
     eframe::run_native(
         "CueMesh2 Client",
         native_options,

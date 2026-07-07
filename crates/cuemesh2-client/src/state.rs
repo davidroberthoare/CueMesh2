@@ -28,6 +28,9 @@ pub struct AppState {
     /// Last playback drift measurement (positive = ahead of master).
     pub last_drift_ms: Option<i64>,
     pub playback: ClientPlayback,
+    /// True while the controller's test pattern is displayed; drives the
+    /// centred client-id overlay.
+    pub testscreen_on: bool,
     pub log_lines: Vec<String>,
 }
 

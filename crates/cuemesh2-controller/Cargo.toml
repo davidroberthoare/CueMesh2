@@ -26,6 +26,10 @@ mdns-sd = { workspace = true }
 
 eframe = { workspace = true }
 egui = { workspace = true }
+# Icon font (pure Rust, egui 0.29) — egui's default fonts lack symbol glyphs.
+egui-phosphor = "0.7"
+# Pure-egui file picker — no native GTK/Qt dependency, unlike `rfd`.
+egui-file-dialog = "0.7"
 
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

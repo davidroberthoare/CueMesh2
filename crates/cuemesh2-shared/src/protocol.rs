@@ -109,7 +109,6 @@ pub struct ShowSync {
     pub title: String,
     pub dropout_policy: DropoutPolicy,
     pub sync: SyncConfig,
-    pub default_fade_ms: u32,
     pub cues: Vec<Cue>,
 }
 
@@ -122,16 +121,18 @@ pub struct ShowSync {
 pub struct LoadCue {
     pub cue_id: String,
     pub layer: Layer,
+    #[serde(default)]
     pub file: PathBuf,
     pub kind: CueKind,
+    /// Solid colour (`#RRGGBB`) for `color` cues; ignored otherwise.
+    #[serde(default)]
+    pub color: Option<String>,
     #[serde(default)]
     pub start_ms: Option<u64>,
     #[serde(default)]
     pub end_ms: Option<u64>,
-    pub fade_in_ms: u32,
-    pub fade_out_ms: u32,
     #[serde(default)]
-    pub crossfade_to_next_ms: u32,
+    pub fade_in_ms: u32,
 }
 
 /// Start the preloaded cue at a synchronized wall-clock time.
@@ -370,11 +371,10 @@ mod tests {
                 layer: Layer::A,
                 file: PathBuf::from("intro.mp4"),
                 kind: CueKind::Video,
+                color: None,
                 start_ms: None,
                 end_ms: Some(30_000),
                 fade_in_ms: 500,
-                fade_out_ms: 0,
-                crossfade_to_next_ms: 1000,
             }),
         );
         let json = serde_json::to_string(&env).unwrap();
@@ -384,7 +384,7 @@ mod tests {
                 assert_eq!(c.cue_id, "cue-1");
                 assert_eq!(c.layer, Layer::A);
                 assert_eq!(c.kind, CueKind::Video);
-                assert_eq!(c.crossfade_to_next_ms, 1000);
+                assert_eq!(c.fade_in_ms, 500);
             }
             _ => panic!("wrong variant"),
         }
@@ -399,11 +399,10 @@ mod tests {
                 layer: Layer::B,
                 file: PathBuf::from("next.mp4"),
                 kind: CueKind::Video,
+                color: None,
                 start_ms: None,
                 end_ms: None,
                 fade_in_ms: 500,
-                fade_out_ms: 0,
-                crossfade_to_next_ms: 0,
             }),
         );
         let json = serde_json::to_string(&env).unwrap();
@@ -462,15 +461,13 @@ mod tests {
                 title: "T".into(),
                 dropout_policy: DropoutPolicy::Freeze,
                 sync: SyncConfig::default(),
-                default_fade_ms: 1500,
                 cues: vec![Cue {
                     id: "c1".into(),
                     name: "One".into(),
                     kind: CueKind::Image,
                     file: PathBuf::from("a.jpg"),
+                    color: None,
                     fade_in_ms: 0,
-                    fade_out_ms: 0,
-                    crossfade_to_next_ms: 0,
                     notes: None,
                 }],
             }),

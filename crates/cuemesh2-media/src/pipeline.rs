@@ -490,6 +490,39 @@ impl MediaEngine {
         self.install_producer(layer, pipeline, gst::State::Playing)
     }
 
+    /// Load a solid-colour cue on `layer`: a `videotestsrc` in solid-colour
+    /// mode conformed to the canvas, prerolled (PAUSED) like any other cue so
+    /// STANDBY/PLAY_AT and alpha crossfades work uniformly. Used for fades to
+    /// black/white. `rgb` is the fill colour.
+    pub fn load_color(&self, layer: Layer, rgb: [u8; 3]) -> Result<(), MediaError> {
+        let pipeline = gst::Pipeline::with_name(&format!("cuemesh2-color-{layer:?}"));
+        let src = make("videotestsrc", None)?;
+        // Non-live so it prerolls a frame in PAUSED, exactly like the image and
+        // video producers; the sink clock still paces delivery to the canvas fps.
+        src.set_property("is-live", false);
+        src.set_property_from_str("pattern", "solid-color");
+        // foreground-color is packed 0xAARRGGBB.
+        let argb: u32 = 0xFF00_0000
+            | ((rgb[0] as u32) << 16)
+            | ((rgb[1] as u32) << 8)
+            | rgb[2] as u32;
+        src.set_property("foreground-color", argb);
+        let convert = make("videoconvert", None)?;
+        let scale = make("videoscale", None)?;
+        let caps = make("capsfilter", None)?;
+        caps.set_property("caps", self.inner.canvas.caps());
+        let sink = make("intervideosink", None)?;
+        sink.set_property("channel", channel_name(layer));
+
+        pipeline
+            .add_many([&src, &convert, &scale, &caps, &sink])
+            .map_err(|e| MediaError::AddMany(e.to_string()))?;
+        gst::Element::link_many([&src, &convert, &scale, &caps, &sink])
+            .map_err(|e| MediaError::LinkElements(e.to_string()))?;
+
+        self.install_producer(layer, pipeline, gst::State::Paused)
+    }
+
     /// Decoder producer: uridecodebin → (imagefreeze) → convert/scale/rate →
     /// canvas caps → intervideosink.
     fn build_producer(
@@ -964,6 +997,15 @@ mod tests {
         assert!(engine.is_loaded(Layer::A));
         engine.stop(Layer::A);
         assert!(!engine.is_loaded(Layer::A));
+    }
+
+    #[test]
+    fn color_loads_and_stops() {
+        let engine = MediaEngine::new().expect("build");
+        engine.load_color(Layer::B, [0, 0, 0]).expect("color");
+        assert!(engine.is_loaded(Layer::B));
+        engine.stop(Layer::B);
+        assert!(!engine.is_loaded(Layer::B));
     }
 }
 

@@ -122,9 +122,22 @@ No picture-in-picture, no wipes, no arbitrary N layers.
 
 The engine picks the sink at startup based on what GStreamer's registry reports available.
 
+### Fade Model
+
+Every cue has a **single `fade_in_ms`**. When nothing is on air it is the
+fade-from-black duration; when a cue is already playing it is the crossfade
+duration *into* this cue (i.e. the incoming cue's fade-in drives the
+crossfade). There is no separate `fade_out_ms` or `crossfade_to_next_ms`.
+To **fade to black** (or any colour), add a `color`-type cue and GO into it —
+its `fade_in_ms` is the fade duration.
+
 ### Auto-Preload Behaviour
 
-When a cue defines `crossfade_to_next_ms > 0` (or fade timings that imply the next cue must be ready), the **client auto-preloads the next cue onto the idle layer as soon as any in-progress fades on that layer have completed**. The client does not wait for the controller to issue a `LOAD_CUE` for the next cue — it uses its knowledge of the show file to prepare ahead. The controller can still issue `LOAD_CUE` explicitly (e.g. if the operator jumps out of order), which overrides any speculative preload.
+The controller speculatively **preloads (STANDBY) the selected cue onto the
+idle layer** once the selection settles, so GO starts instantly instead of
+stalling on a cold decode. The controller can also issue `LOAD_CUE` explicitly
+(e.g. if the operator jumps out of order), which overrides any speculative
+preload.
 
 ### Playback Control API (what the client calls into)
 
@@ -140,6 +153,7 @@ When a cue defines `crossfade_to_next_ms > 0` (or fade timings that imply the ne
 
 - **Video containers/codecs:** anything GStreamer supports out of the box. Recommend **H.264 in MP4** for maximum hardware-acceleration coverage, or WebM (VP9 + Opus) where CPU headroom allows.
 - **Images:** treat as a "video" of arbitrary duration by looping a single decoded frame — keeps the pipeline uniform.
+- **Colour cues:** a solid-colour `videotestsrc` producer (`load_color`), used for fades to black/white; no media file.
 - **Ceiling:** 1080p30 on x86 and Pi 4; 720p30 on Pi 3 (H.264 only, see below).
 
 ### Hardware Decode on Pi 3 (armv7)
@@ -164,17 +178,17 @@ JSON envelopes over WebSocket on **port 9420**:
 
 **Controller → Client**
 - `HELLO_ACK`
-- `LOAD_CUE` — layer, file path, start/end ms, volume, fade_in_ms, fade_out_ms, crossfade_to_next_ms
+- `LOAD_CUE` — layer, kind (video/image/color), file path (or color), start/end ms, fade_in_ms
 - `PLAY_AT` — `master_start_utc_ms`
 - `SEEK_TO`, `SET_RATE`, `SET_VOLUME`
 - `CROSSFADE` — operator-triggered manual crossfade to a specific cue; duration_ms
 - **`PAUSE`** — freeze playback in place on all layers; alphas held; no fades.
-- **`FADE`** — fade all layers to black at the show's `default_fade_ms` rate, then stop.
+- **`FADE`** — fade all layers to black at the fixed `DEFAULT_FADE_MS` (1500ms) rate, then stop.
 - **`STOP`** — cut all layers to black instantly, stop pipelines.
 - `SHOW_TESTSCREEN`
 - `REQUEST_STATUS`, `SYNC`, `READY_CHECK`
 
-Note: per-cue `fade_in_ms`, `fade_out_ms`, and `crossfade_to_next_ms` are payload fields on `LOAD_CUE` and are executed automatically by the client — they are not separate wire messages. `PAUSE` / `FADE` / `STOP` are the three operator-facing override commands.
+Note: per-cue `fade_in_ms` is a payload field on `LOAD_CUE`/`PLAY_AT` and is executed automatically by the client — it is not a separate wire message. `PAUSE` / `FADE` / `STOP` are the three operator-facing override commands.
 
 **Client → Controller**
 - `HELLO` (client_id, human name), `READY`
@@ -242,19 +256,23 @@ rate_max = 1.05
 hard_seek_threshold_ms = 300
 sync_interval_ms = 1000
 
-[show.settings]
-default_fade_ms = 1500        # used by the operator FADE command
+[[cues]]
+id = "cue-001"                 # auto-generated; hidden in the editor UI
+name = "Opening"
+type = "video"                 # video | image | color
+file = "opening.webm"          # relative to media_root (omit for color cues)
+fade_in_ms = 500               # fade-from-black, or crossfade-in when a cue is on air
 
 [[cues]]
-id = "cue-001"
-name = "Opening"
-type = "video"                # video | image
-file = "opening.webm"
-volume = 100
-fade_in_ms = 500
-fade_out_ms = 500
-crossfade_to_next_ms = 0       # >0 means crossfade into the next cue
+id = "cue-002"
+name = "Fade to black"
+type = "color"
+color = "#000000"              # solid colour; file is unused
+fade_in_ms = 1500
 ```
+
+`default_fade_ms` and the `[show.settings]` table were removed; the operator
+BLACKOUT/FADE command uses a fixed `DEFAULT_FADE_MS` constant.
 
 Loaded and validated with `serde` + `toml`. Validation: unique cue IDs, file existence relative to `media_root`, enum variants, sensible ranges.
 
@@ -272,9 +290,9 @@ Loaded and validated with `serde` + `toml`. Validation: unique cue IDs, file exi
 
 Minimal, functional, `egui`.
 
-**Controller** — show manager (open/create/recent), cue list with GO/NEXT/PREV/BLACKOUT, client roster with accept/reject and status, diagnostics/log view.
+**Controller** — show manager (open/save/save-as via a pure-egui file dialog), a cue **table editor** (name/type/source/fade-in with per-row actions; ids are auto-generated and hidden), cue list with GO/NEXT/PREV/BLACKOUT, client roster with status, diagnostics/log view. Toolbar/table icons use the `egui-phosphor` icon font (egui's default fonts lack symbol glyphs).
 
-**Client** — connect screen (discovered controllers + manual IP), thin status overlay (current cue, position, drift, layer alphas), test pattern.
+**Client** — a chromeless, resizable box showing *just* the video canvas. Text appears only (1) on startup / when disconnected: a small grey status line at the bottom; and (2) on testscreen: the client's name + id centred over the pattern. Controller selection is automatic (first mDNS-discovered controller adopted while offline; manual override via `CUEMESH_CONTROLLER`).
 
 The GUI runs on the main thread. Everything I/O-heavy is on `tokio` tasks communicating with the GUI via channels.
 

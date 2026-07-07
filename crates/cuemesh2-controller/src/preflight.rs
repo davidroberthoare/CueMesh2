@@ -187,9 +187,8 @@ mod tests {
             name: id.into(),
             kind: CueKind::Video,
             file: PathBuf::from(file),
+            color: None,
             fade_in_ms: 0,
-            fade_out_ms: 0,
-            crossfade_to_next_ms: 0,
             notes: None,
         }
     }

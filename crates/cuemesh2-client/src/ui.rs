@@ -1,4 +1,9 @@
-//! Client egui window: video display with status overlay and connect screen.
+//! Client egui window: a chromeless, resizable box that is *just* the video
+//! canvas. Text appears in only two situations: (1) startup / disconnected —
+//! a small grey status line at the bottom; (2) testscreen — a large centred
+//! block naming this client. Controller selection is automatic: the first
+//! mDNS-discovered controller is adopted while offline (manual override via
+//! `CUEMESH_CONTROLLER`).
 
 use std::time::Duration;
 
@@ -8,17 +13,14 @@ use crate::state::SharedState;
 
 pub struct ClientApp {
     state: SharedState,
-    manual_url: String,
     engine: MediaEngine,
     video_texture: Option<egui::TextureHandle>,
 }
 
 impl ClientApp {
     pub fn new(state: SharedState, engine: MediaEngine) -> Self {
-        let manual_url = state.lock().unwrap().controller_addr.clone();
         Self {
             state,
-            manual_url,
             engine,
             video_texture: None,
         }
@@ -28,8 +30,8 @@ impl ClientApp {
 impl eframe::App for ClientApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Repaints are driven by the engine's frame-notify callback (see
-        // main.rs); this slow tick only keeps the overlay/status fresh when
-        // no video is flowing.
+        // main.rs); this slow tick only keeps the status line fresh when no
+        // video is flowing.
         ctx.request_repaint_after(Duration::from_millis(250));
 
         // ── Pick up a new composited video frame, if one landed ──────────
@@ -40,8 +42,8 @@ impl eframe::App for ClientApp {
             if rgba.len() >= w * h * 4 {
                 let color_image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
                 let opts = egui::TextureOptions::default();
-                // Update the existing texture in place; allocating a fresh
-                // GPU texture every frame causes visible jank.
+                // Update the existing texture in place; allocating a fresh GPU
+                // texture every frame causes visible jank.
                 match &mut self.video_texture {
                     Some(tex) => tex.set(color_image, opts),
                     None => {
@@ -53,128 +55,88 @@ impl eframe::App for ClientApp {
         }
 
         // ── Snapshot shared state ────────────────────────────────────────
-        let (name, id, addr, connected, pb, _offset, drift, show_title, _media_root, discovered, _log_tail) = {
-            let s = self.state.lock().unwrap();
+        let (name, id, addr, connected, testscreen_on) = {
+            let mut s = self.state.lock().unwrap();
+            // Auto-adopt the first discovered controller while offline and no
+            // explicit target has been chosen yet, so no in-window connect UI
+            // is needed on a normal LAN.
+            if !s.connected && s.desired_url.is_none() {
+                if let Some(url) = s.discovered.values().next().cloned() {
+                    s.desired_url = Some(url);
+                }
+            }
             (
                 s.name.clone(),
                 s.client_id.clone(),
                 s.controller_addr.clone(),
                 s.connected,
-                s.playback.clone(),
-                s.clock_offset_ms,
-                s.last_drift_ms,
-                s.show.as_ref().map(|sh| sh.title.clone()),
-                s.media_root.clone(),
-                s.discovered.clone(),
-                s.log_lines.iter().rev().take(80).cloned().collect::<Vec<_>>(),
+                s.testscreen_on,
             )
         };
 
-        // ── Top bar ──────────────────────────────────────────────────────
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("CueMesh2 Client");
-                ui.separator();
-                ui.label(format!("{name}  ({id})"));
-                ui.separator();
-                ui.label(format!(
-                    "controller: {addr}   {}",
-                    if connected { "● online" } else { "○ offline" }
-                ));
-            });
-        });
-
-        // ── Central area: video background + overlay ─────────────────────
+        // ── The whole window is the canvas: black background + video ─────
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::BLACK))
             .show(ctx, |ui| {
-                let available = ui.available_size();
+                let rect = ui.max_rect();
+                let painter = ui.painter();
 
-                // Paint the video frame filling the available space.
+                // Paint the video frame, letterboxed to fit.
                 if let Some(tex) = &self.video_texture {
-                    let img_size = tex.size_vec2();
-                    let scale = (available.x / img_size.x).min(available.y / img_size.y);
-                    let final_size = img_size * scale;
-                    // Center within the available area.
-                    let x_off = (available.x - final_size.x).max(0.0) / 2.0;
-                    let y_off = (available.y - final_size.y).max(0.0) / 2.0;
-                    let rect = egui::Rect::from_min_size(
-                        ui.min_rect().min + egui::vec2(x_off, y_off),
-                        final_size,
+                    let img = tex.size_vec2();
+                    let scale = (rect.width() / img.x).min(rect.height() / img.y);
+                    let size = img * scale;
+                    let pos = rect.center() - size / 2.0;
+                    let dst = egui::Rect::from_min_size(pos, size);
+                    painter.image(
+                        tex.id(),
+                        dst,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
                     );
-                    ui.put(rect, |ui: &mut egui::Ui| -> egui::Response {
-                        ui.add(egui::Image::new(tex).fit_to_exact_size(final_size))
-                    });
                 }
 
-                // Overlay: connect screen when offline.
+                // 1. Testscreen: large centred client identity on a black
+                // panel so it stays legible over the colour-bar pattern.
+                if testscreen_on {
+                    let short = &id[..8.min(id.len())];
+                    let name_g = painter.layout_no_wrap(
+                        name.clone(),
+                        egui::FontId::proportional(56.0),
+                        egui::Color32::WHITE,
+                    );
+                    let id_g = painter.layout_no_wrap(
+                        format!("id {short}"),
+                        egui::FontId::proportional(22.0),
+                        egui::Color32::from_gray(200),
+                    );
+                    let gap = 10.0;
+                    let w = name_g.rect.width().max(id_g.rect.width());
+                    let h = name_g.rect.height() + gap + id_g.rect.height();
+                    let pad = egui::vec2(32.0, 22.0);
+                    let bg = egui::Rect::from_center_size(rect.center(), egui::vec2(w, h) + pad * 2.0);
+                    painter.rect_filled(bg, 12.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 220));
+                    let name_pos =
+                        egui::pos2(rect.center().x - name_g.rect.width() / 2.0, bg.top() + pad.y);
+                    let id_pos = egui::pos2(
+                        rect.center().x - id_g.rect.width() / 2.0,
+                        name_pos.y + name_g.rect.height() + gap,
+                    );
+                    painter.galley(name_pos, name_g, egui::Color32::WHITE);
+                    painter.galley(id_pos, id_g, egui::Color32::from_gray(200));
+                }
+
+                // 2. Startup / disconnected: small grey status line, bottom.
                 if !connected {
-                    let overlay = egui::Frame::none()
-                        .fill(egui::Color32::from_black_alpha(180))
-                        .rounding(6.0)
-                        .inner_margin(egui::Margin::symmetric(16.0, 8.0));
-                    let rect = egui::Rect::from_min_size(
-                        ui.min_rect().min + egui::vec2(16.0, 8.0),
-                        egui::vec2(360.0, available.y - 16.0),
+                    let msg = format!("CueMesh2 · {name} · connecting to {addr} …");
+                    painter.text(
+                        egui::pos2(rect.left() + 10.0, rect.bottom() - 8.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        msg,
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::from_gray(130),
                     );
-                    ui.put(rect, |ui: &mut egui::Ui| -> egui::Response {
-                        overlay
-                            .show(ui, |ui| {
-                                ui.heading("Connect");
-                                if discovered.is_empty() {
-                                    ui.label("(searching for controllers on the LAN…)");
-                                }
-                                for (name, url) in &discovered {
-                                    let pretty = name.split("._cuemesh").next().unwrap_or(name);
-                                    if ui.button(format!("{pretty}  ({url})")).clicked() {
-                                        self.state.lock().unwrap().desired_url =
-                                            Some(url.clone());
-                                    }
-                                }
-                                ui.horizontal(|ui| {
-                                    ui.label("Manual:");
-                                    ui.text_edit_singleline(&mut self.manual_url);
-                                    if ui.button("Connect").clicked()
-                                        && !self.manual_url.trim().is_empty()
-                                    {
-                                        self.state.lock().unwrap().desired_url =
-                                            Some(self.manual_url.trim().to_string());
-                                    }
-                                });
-                            })
-                            .response
-                    });
                 }
-
-                // Overlay: minimal status in the bottom-right corner.
-                let status_text = format!(
-                    "{} state: {:?}  {:?}  pos: {} ms  α A={:.2} B={:.2}  drift: {}",
-                    show_title.unwrap_or_default(),
-                    pb.state,
-                    pb.current_cue_id.unwrap_or_else(|| "—".into()),
-                    pb.position_ms,
-                    pb.layer_a_alpha,
-                    pb.layer_b_alpha,
-                    drift.map(|v| format!("{v} ms")).unwrap_or_else(|| "—".into()),
-                );
-                let bottom_left = egui::pos2(
-                    ui.min_rect().min.x + 8.0,
-                    ui.min_rect().max.y - 20.0,
-                );
-                let status_rect = egui::Rect::from_min_size(
-                    bottom_left,
-                    egui::vec2(available.x - 16.0, 18.0),
-                );
-                ui.put(status_rect, |ui: &mut egui::Ui| -> egui::Response {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&status_text)
-                                .color(egui::Color32::WHITE)
-                                .size(13.0),
-                        )
-                        .selectable(false),
-                    )
-                });
             });
     }
 }

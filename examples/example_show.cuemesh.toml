@@ -1,30 +1,18 @@
-# CueMesh2 example show.
-#
-# Media paths are relative to media_root; every client resolves them
-# against its OWN media root (env CUEMESH_MEDIA_ROOT, default the same
-# ~/cuemesh_media), so this file works unchanged across machines.
-#
-# Recommended encoding: H.264 in MP4. Hardware decoding picks it up on
-# virtually everything; AV1/HEVC fall back to slow software decoding.
-
 [show]
 title = "Example Show"
 version = 1
 media_root = "~/cuemesh_media"
-dropout_policy = "continue"          # continue | freeze | black
+dropout_policy = "continue"
 
 [show.sync]
 max_drift_ms = 150
 start_lead_ms = 250
 
 [show.sync.correction]
-rate_min = 0.95
-rate_max = 1.05
+rate_min = 0.949999988079071
+rate_max = 1.0499999523162842
 hard_seek_threshold_ms = 300
 sync_interval_ms = 1000
-
-[show.settings]
-default_fade_ms = 1500               # used by the operator BLACKOUT command
 
 [[cues]]
 id = "cue-001"
@@ -32,7 +20,6 @@ name = "Preshow Title"
 type = "image"
 file = "pic1.jpg"
 fade_in_ms = 500
-fade_out_ms = 500
 
 [[cues]]
 id = "cue-002"
@@ -40,18 +27,33 @@ name = "Countdown"
 type = "video"
 file = "countdown.mp4"
 fade_in_ms = 750
-crossfade_to_next_ms = 1000          # GO during this cue crossfades into the next
 
 [[cues]]
 id = "cue-003"
 name = "Main Video"
 type = "video"
 file = "test1.mp4"
-fade_out_ms = 1500
+fade_in_ms = 1000
 
 [[cues]]
 id = "cue-004"
-name = "Closing Card"
-type = "image"
-file = "pic2.jpg"
-fade_in_ms = 1000
+name = "Fade to Black"
+type = "color"
+file = ""
+color = "#000000"
+fade_in_ms = 1500
+
+[[cues]]
+id = "cue-0001"
+name = "Fade to Black"
+type = "color"
+file = ""
+color = "#F20000"
+fade_in_ms = 1500
+
+[[cues]]
+id = "cue-0002"
+name = "Cue 6"
+type = "video"
+file = "test3.mp4"
+fade_in_ms = 0

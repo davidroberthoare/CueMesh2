@@ -1,16 +1,30 @@
 //! Operator window: cue list with GO/NEXT/PREV, transport, client roster
 //! with preflight results and media push, log view.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use egui_file_dialog::FileDialog;
+use egui_phosphor::regular as icon;
+
 use cuemesh2_shared::protocol::{ControllerMsg, FadeCmd, Layer, MediaFileStatus, PlayAt};
-use cuemesh2_shared::show::ShowFile;
+use cuemesh2_shared::show::{CueKind, ShowFile};
 
 use crate::editor::{EditorAction, EditorState};
 use crate::preflight;
 use crate::server::{broadcast, load_cue_for, now_utc_ms};
 use crate::state::SharedState;
+
+/// A file dialog pre-filtered to CueMesh show files.
+fn show_dialog() -> FileDialog {
+    let filter: Arc<dyn Fn(&Path) -> bool + Send + Sync> =
+        Arc::new(|p| p.to_string_lossy().to_ascii_lowercase().ends_with(".cuemesh.toml"));
+    FileDialog::new()
+        .add_file_filter("CueMesh shows (*.cuemesh.toml)", filter)
+        .default_file_filter("CueMesh shows (*.cuemesh.toml)")
+        .default_file_name("show.cuemesh.toml")
+}
 
 /// How long a cue selection must hold still before we preload it. Keeps
 /// arrow-key scrolling from firing a cold decode on every intermediate cue.
@@ -34,6 +48,10 @@ pub struct ControllerApp {
     /// standby debounce.
     last_selected: Option<usize>,
     selected_since: Instant,
+    /// "Open show…" picker.
+    open_dialog: FileDialog,
+    /// Editor "Save as…" picker.
+    save_dialog: FileDialog,
 }
 
 impl ControllerApp {
@@ -44,6 +62,8 @@ impl ControllerApp {
             editor: EditorState::default(),
             last_selected: None,
             selected_since: Instant::now(),
+            open_dialog: show_dialog(),
+            save_dialog: show_dialog(),
         };
         // Auto-load the show named by CUEMESH_SHOW so headless-ish setups
         // (and operators with a fixed show) skip the open dialog entirely.
@@ -88,16 +108,14 @@ impl ControllerApp {
             let Some(idx) = s.selected_cue_idx else { return };
             let Some(cue) = show.cues.get(idx).cloned() else { return };
 
-            let outgoing = s.run.playing_cue_idx.and_then(|i| show.cues.get(i).cloned());
+            let on_air = s.run.playing_cue_idx.and_then(|i| show.cues.get(i)).is_some();
             let n = show.cues.len();
             let lead_ms = show.show.sync.start_lead_ms.max(250) as u64;
             let target_layer = idle_layer(s.run.active_layer);
-            // Crossfade when something is on air. The duration prefers the
-            // outgoing cue's crossfade_to_next_ms, falls back to the incoming
-            // fade-in, and never goes below 40ms (a near-cut, but glitch-free).
-            let crossfade_ms = outgoing
-                .as_ref()
-                .map(|out| out.crossfade_to_next_ms.max(cue.fade_in_ms).max(40));
+            // Crossfade when something is on air. The incoming cue's fade-in is
+            // the single knob for both fade-from-black and crossfade duration;
+            // never below 40ms (a near-cut, but glitch-free).
+            let crossfade_ms = on_air.then(|| cue.fade_in_ms.max(40));
 
             // Did STANDBY already preload this exact cue on this layer?
             let preloaded = s.run.standby.as_ref() == Some(&(cue.id.clone(), target_layer));
@@ -185,15 +203,13 @@ impl ControllerApp {
     }
 
     fn blackout(&self) {
-        let duration_ms = {
-            let mut s = self.state.lock().unwrap();
-            s.run = Default::default();
-            s.show
-                .as_ref()
-                .map(|sh| sh.show.settings.default_fade_ms)
-                .unwrap_or(1500)
-        };
-        broadcast(&self.state, ControllerMsg::Fade(FadeCmd { duration_ms }));
+        self.state.lock().unwrap().run = Default::default();
+        broadcast(
+            &self.state,
+            ControllerMsg::Fade(FadeCmd {
+                duration_ms: cuemesh2_shared::show::DEFAULT_FADE_MS,
+            }),
+        );
     }
 
     fn stop_all(&self) {
@@ -232,8 +248,7 @@ impl ControllerApp {
         }
     }
 
-    /// Render the editor and act on its result. Returns whether edit mode is
-    /// still active (so the caller can skip run-mode panels).
+    /// Render the editor and act on its result.
     fn editor_panel(&mut self, ctx: &egui::Context) {
         let mut action = EditorAction::None;
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -251,21 +266,40 @@ impl ControllerApp {
                     Err(e) => self.editor.set_status(format!("invalid: {e}")),
                 }
             }
+            // Save to the known path, or fall through to Save-as when unset.
             EditorAction::Save => match self.editor.save_path() {
-                None => self.editor.set_status("set a save path first"),
-                Some(path) => {
-                    let show = self.editor.build();
-                    match show.save(&path) {
-                        Ok(()) => {
-                            self.state.lock().unwrap().show_path = Some(path.clone());
-                            self.apply_show(show);
-                            self.editor.set_status(format!("saved to {}", path.display()));
-                        }
-                        Err(e) => self.editor.set_status(format!("save failed: {e}")),
-                    }
-                }
+                Some(path) => self.save_editor_to(path),
+                None => self.save_dialog.save_file(),
             },
+            EditorAction::SaveAs => self.save_dialog.save_file(),
             EditorAction::Close => self.editor.open = false,
+        }
+    }
+
+    /// Build the draft, write it to `path`, remember the path, and push it live.
+    fn save_editor_to(&mut self, path: PathBuf) {
+        let show = self.editor.build();
+        match show.save(&path) {
+            Ok(()) => {
+                self.editor.set_path(&path);
+                self.state.lock().unwrap().show_path = Some(path.clone());
+                self.apply_show(show);
+                self.editor.set_status(format!("saved to {}", path.display()));
+            }
+            Err(e) => self.editor.set_status(format!("save failed: {e}")),
+        }
+    }
+
+    /// Advance both file dialogs and act on a completed pick. Call last in the
+    /// frame so the dialog window renders on top of the panels.
+    fn drive_dialogs(&mut self, ctx: &egui::Context) {
+        self.open_dialog.update(ctx);
+        if let Some(path) = self.open_dialog.take_selected() {
+            self.load_show_from_path(path);
+        }
+        self.save_dialog.update(ctx);
+        if let Some(path) = self.save_dialog.take_selected() {
+            self.save_editor_to(path);
         }
     }
 }
@@ -306,7 +340,7 @@ impl eframe::App for ControllerApp {
                 Some(sf) => sf
                     .cues
                     .iter()
-                    .map(|c| (c.id.clone(), c.name.clone(), c.crossfade_to_next_ms))
+                    .map(|c| (c.name.clone(), c.kind, c.fade_in_ms))
                     .collect(),
                 None => vec![],
             };
@@ -339,21 +373,15 @@ impl eframe::App for ControllerApp {
                 ui.separator();
                 ui.label(show_summary);
                 ui.separator();
-                if ui.button("Open show…").clicked() {
-                    let path = std::env::var("CUEMESH_SHOW").ok().map(PathBuf::from).or_else(|| {
-                        Some(
-                            std::env::current_dir()
-                                .unwrap_or_default()
-                                .join("examples/example_show.cuemesh.toml"),
-                        )
-                    });
-                    if let Some(p) = path {
-                        self.load_show_from_path(p);
-                    }
+                if ui.button(format!("{}  Open show", icon::FOLDER_OPEN)).clicked() {
+                    self.open_dialog.select_file();
                 }
                 ui.separator();
                 if ui
-                    .add_enabled(!preflight_running, egui::Button::new("Preflight"))
+                    .add_enabled(
+                        !preflight_running,
+                        egui::Button::new(format!("{}  Preflight", icon::CHECK_CIRCLE)),
+                    )
                     .clicked()
                 {
                     preflight::start_preflight(&self.state);
@@ -362,7 +390,11 @@ impl eframe::App for ControllerApp {
                     ui.spinner();
                 }
                 ui.separator();
-                let ts_label = if self.testscreen_on { "Hide testscreen" } else { "Testscreen" };
+                let ts_label = if self.testscreen_on {
+                    format!("{}  Hide testscreen", icon::EYE_SLASH)
+                } else {
+                    format!("{}  Testscreen", icon::EYE)
+                };
                 if ui.button(ts_label).clicked() {
                     self.testscreen_on = !self.testscreen_on;
                     broadcast(
@@ -376,10 +408,10 @@ impl eframe::App for ControllerApp {
                 }
                 ui.separator();
                 if !self.editor.open {
-                    if ui.button("New show").clicked() {
+                    if ui.button(format!("{}  New show", icon::FILE_PLUS)).clicked() {
                         self.open_editor(true);
                     }
-                    if ui.button("Edit show").clicked() {
+                    if ui.button(format!("{}  Edit show", icon::PENCIL_SIMPLE)).clicked() {
                         self.open_editor(false);
                     }
                 }
@@ -389,6 +421,7 @@ impl eframe::App for ControllerApp {
         // Edit mode takes over the body; run-mode panels are hidden.
         if self.editor.open {
             self.editor_panel(ctx);
+            self.drive_dialogs(ctx);
             return;
         }
 
@@ -396,12 +429,16 @@ impl eframe::App for ControllerApp {
             ui.heading("Cues");
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for (i, (id, name, crossfade)) in cues.iter().enumerate() {
+                for (i, (name, kind, _fade_in)) in cues.iter().enumerate() {
                     let is_sel = selected == Some(i);
                     let on_air = playing_idx == Some(i);
-                    let marker = if on_air { "▶" } else { " " };
-                    let xf = if *crossfade > 0 { " ⤳" } else { "" };
-                    let label = format!("{marker} {i:>3}  {id}  —  {name}{xf}");
+                    let marker = if on_air { icon::PLAY } else { " " };
+                    let kind_icon = match kind {
+                        CueKind::Video => icon::FILM_STRIP,
+                        CueKind::Image => icon::IMAGE,
+                        CueKind::Color => icon::PALETTE,
+                    };
+                    let label = format!("{marker} {i:>3}  {kind_icon} {name}");
                     if ui.selectable_label(is_sel, label).clicked() {
                         self.state.lock().unwrap().selected_cue_idx = Some(i);
                     }
@@ -419,8 +456,15 @@ impl eframe::App for ControllerApp {
             for c in &clients {
                 ui.group(|ui| {
                     let stale = now.saturating_sub(c.last_heartbeat_ms) > 3000;
-                    let dot = if stale { "🔴" } else { "🟢" };
-                    ui.label(format!("{dot} {}  ({})", c.name, &c.client_id[..8.min(c.client_id.len())]));
+                    let dot_color = if stale {
+                        egui::Color32::from_rgb(220, 70, 70)
+                    } else {
+                        egui::Color32::from_rgb(80, 200, 110)
+                    };
+                    ui.horizontal(|ui| {
+                        ui.colored_label(dot_color, icon::CIRCLE);
+                        ui.label(format!("{}  ({})", c.name, &c.client_id[..8.min(c.client_id.len())]));
+                    });
                     ui.label(format!("addr: {}   state: {:?}", c.addr, c.state));
                     if let Some(cue) = &c.current_cue {
                         ui.label(format!("cue: {cue}  @ {}", fmt_ms(c.position_ms)));
@@ -445,7 +489,7 @@ impl eframe::App for ControllerApp {
                                     MediaFileStatus::Mismatch { .. } => "mismatch",
                                     MediaFileStatus::Ok => unreachable!(),
                                 };
-                                ui.label(format!("   ⚠ {} ({what})", path.display()));
+                                ui.label(format!("   {} {} ({what})", icon::WARNING, path.display()));
                             }
                         }
                         if let Some((path, received, total)) = &c.push_progress {
@@ -472,28 +516,28 @@ impl eframe::App for ControllerApp {
                 if ui.add(go).clicked() {
                     self.go_selected();
                 }
-                if ui.button("PREV").clicked() {
+                if ui.button(format!("{}  PREV", icon::CARET_UP)).clicked() {
                     self.move_selection(-1);
                 }
-                if ui.button("NEXT").clicked() {
+                if ui.button(format!("{}  NEXT", icon::CARET_DOWN)).clicked() {
                     self.move_selection(1);
                 }
                 ui.separator();
-                if ui.button("PAUSE").clicked() {
+                if ui.button(format!("{}  PAUSE", icon::PAUSE)).clicked() {
                     broadcast(&self.state, ControllerMsg::Pause);
                 }
-                if ui.button("RESUME").clicked() {
+                if ui.button(format!("{}  RESUME", icon::PLAY)).clicked() {
                     broadcast(&self.state, ControllerMsg::Resume);
                 }
                 ui.separator();
-                if ui.button("BLACKOUT (fade)").clicked() {
+                if ui.button(format!("{}  BLACKOUT", icon::MOON)).clicked() {
                     self.blackout();
                 }
-                if ui.button("STOP (cut)").clicked() {
+                if ui.button(format!("{}  STOP", icon::STOP)).clicked() {
                     self.stop_all();
                 }
             });
-            ui.label("space = GO   ↑/↓ = select cue");
+            ui.label("space = GO    up / down arrows = select cue");
             ui.separator();
             ui.heading("Log");
             egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
@@ -502,5 +546,7 @@ impl eframe::App for ControllerApp {
                 }
             });
         });
+
+        self.drive_dialogs(ctx);
     }
 }

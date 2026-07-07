@@ -54,7 +54,6 @@ pub fn show_sync_msg(state: &SharedState) -> Option<ControllerMsg> {
         title: show.show.title.clone(),
         dropout_policy: show.show.dropout_policy,
         sync: show.show.sync.clone(),
-        default_fade_ms: show.show.settings.default_fade_ms,
         cues: show.cues.clone(),
     }))
 }
@@ -66,11 +65,10 @@ pub fn load_cue_for(cue: &Cue, layer: Layer) -> LoadCue {
         layer,
         file: cue.file.clone(),
         kind: cue.kind,
+        color: cue.color.clone(),
         start_ms: None,
         end_ms: None,
         fade_in_ms: cue.fade_in_ms,
-        fade_out_ms: cue.fade_out_ms,
-        crossfade_to_next_ms: cue.crossfade_to_next_ms,
     }
 }
 

@@ -1,19 +1,24 @@
 //! Show editor: create and edit `*.cuemesh.toml` shows in-app.
 //!
-//! The editor works on a *draft* made entirely of `String`/primitive fields so
-//! egui widgets can bind to it directly. It converts to/from [`ShowFile`] on
-//! enter and on build. Cue media files are picked from a scan of the show's
-//! `media_root` (which keeps every path relative to the root, as the wire
-//! protocol and validation require) with a free-text fallback.
+//! The editor works on a *draft* made of `String`/primitive fields so egui
+//! widgets can bind to them directly, converting to/from [`ShowFile`] on enter
+//! and on build. Cues are edited in a table; media files come from a scan of
+//! the show's `media_root` (keeping paths relative, as the wire protocol and
+//! validation require) with a free-text fallback. Colour cues use a colour
+//! picker instead of a file.
 //!
-//! We deliberately avoid a native file-picker dependency (`rfd` links GTK on
-//! Linux, which fights the project's "no system GTK/Qt dep" portability goal).
-//! The save path is a plain text field; media files come from the root scan.
+//! File open/save is handled by the host app via `egui-file-dialog` (a pure
+//! egui picker — no native GTK/Qt dependency), so this module only owns the
+//! draft and the current path.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use egui_phosphor::regular as icon;
+
 use cuemesh2_shared::show::{
-    Cue, CueKind, DropoutPolicy, Show, ShowFile, ShowSettings, SyncConfig, SyncCorrection,
+    format_hex_color, parse_hex_color, Cue, CueKind, DropoutPolicy, Show, ShowFile, SyncConfig,
+    SyncCorrection,
 };
 
 use crate::util::expand_tilde;
@@ -25,8 +30,10 @@ pub enum EditorAction {
     None,
     /// Push the current draft into the running show (state + SHOW_SYNC).
     Apply,
-    /// Write the draft to the path in the editor, then apply.
+    /// Write to the current path (host opens a Save-as dialog if unset).
     Save,
+    /// Always pick a new path via the host's Save-as dialog.
+    SaveAs,
     /// Leave edit mode, discarding unsaved draft changes.
     Close,
 }
@@ -34,13 +41,14 @@ pub enum EditorAction {
 /// One editable cue row (all fields egui can bind to directly).
 #[derive(Debug, Clone)]
 struct CueDraft {
+    /// Hidden, auto-generated; kept stable across an edit session.
     id: String,
     name: String,
     kind: CueKind,
     file: String,
+    /// Solid colour for `Color` cues.
+    color: [u8; 3],
     fade_in_ms: u32,
-    fade_out_ms: u32,
-    crossfade_to_next_ms: u32,
     notes: String,
 }
 
@@ -52,9 +60,8 @@ impl Default for CueDraft {
             name: String::new(),
             kind: CueKind::Video,
             file: String::new(),
+            color: [0, 0, 0],
             fade_in_ms: 0,
-            fade_out_ms: 0,
-            crossfade_to_next_ms: 0,
             notes: String::new(),
         }
     }
@@ -67,23 +74,30 @@ impl CueDraft {
             name: c.name.clone(),
             kind: c.kind,
             file: c.file.to_string_lossy().into_owned(),
+            color: c.color.as_deref().map(parse_hex_color).unwrap_or([0, 0, 0]),
             fade_in_ms: c.fade_in_ms,
-            fade_out_ms: c.fade_out_ms,
-            crossfade_to_next_ms: c.crossfade_to_next_ms,
             notes: c.notes.clone().unwrap_or_default(),
         }
     }
 
     fn to_cue(&self) -> Cue {
         let notes = self.notes.trim();
+        let is_color = self.kind == CueKind::Color;
         Cue {
             id: self.id.trim().to_string(),
             name: self.name.trim().to_string(),
             kind: self.kind,
-            file: PathBuf::from(self.file.trim()),
+            file: if is_color {
+                PathBuf::new()
+            } else {
+                PathBuf::from(self.file.trim())
+            },
+            color: if is_color {
+                Some(format_hex_color(self.color))
+            } else {
+                None
+            },
             fade_in_ms: self.fade_in_ms,
-            fade_out_ms: self.fade_out_ms,
-            crossfade_to_next_ms: self.crossfade_to_next_ms,
             notes: if notes.is_empty() {
                 None
             } else {
@@ -102,7 +116,6 @@ pub struct EditorState {
     version: u32,
     media_root: String,
     dropout: DropoutPolicy,
-    default_fade_ms: u32,
     max_drift_ms: u32,
     start_lead_ms: u32,
     rate_min: f32,
@@ -110,12 +123,14 @@ pub struct EditorState {
     hard_seek_threshold_ms: u32,
     sync_interval_ms: u32,
     cues: Vec<CueDraft>,
-    /// Where "Save" writes.
+    /// Path last saved to / loaded from (shown in the header, target of "Save").
     path: String,
     /// Relative paths of media files found under `media_root`.
     media_files: Vec<String>,
     /// Inline validation / save feedback.
     status: String,
+    /// Monotonic counter for generating hidden cue ids.
+    id_counter: u32,
 }
 
 /// A deferred structural edit to the cue list, applied after the row loop so
@@ -139,7 +154,6 @@ impl EditorState {
         self.version = show.show.version;
         self.media_root = show.show.media_root.to_string_lossy().into_owned();
         self.dropout = show.show.dropout_policy;
-        self.default_fade_ms = show.show.settings.default_fade_ms;
         self.max_drift_ms = show.show.sync.max_drift_ms;
         self.start_lead_ms = show.show.sync.start_lead_ms;
         self.rate_min = show.show.sync.correction.rate_min;
@@ -151,12 +165,40 @@ impl EditorState {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         self.status.clear();
+        self.id_counter = 0;
+        // Backfill ids for any rows that arrived without one.
+        for i in 0..self.cues.len() {
+            if self.cues[i].id.trim().is_empty() {
+                self.cues[i].id = self.next_id();
+            }
+        }
         self.refresh_media_files();
         self.open = true;
     }
 
-    /// Assemble a [`ShowFile`] from the current draft (unvalidated).
+    /// Assemble a [`ShowFile`] from the current draft. Ensures every cue has a
+    /// unique, non-empty id (ids are hidden, so the operator never sees this).
     pub fn build(&self) -> ShowFile {
+        let mut seen = HashSet::new();
+        let mut next = 1u32;
+        let cues = self
+            .cues
+            .iter()
+            .map(|d| {
+                let mut c = d.to_cue();
+                if c.id.is_empty() || !seen.insert(c.id.clone()) {
+                    loop {
+                        let cand = format!("cue-{next:04}");
+                        next += 1;
+                        if seen.insert(cand.clone()) {
+                            c.id = cand;
+                            break;
+                        }
+                    }
+                }
+                c
+            })
+            .collect();
         ShowFile {
             show: Show {
                 title: self.title.trim().to_string(),
@@ -173,11 +215,8 @@ impl EditorState {
                         sync_interval_ms: self.sync_interval_ms,
                     },
                 },
-                settings: ShowSettings {
-                    default_fade_ms: self.default_fade_ms,
-                },
             },
-            cues: self.cues.iter().map(CueDraft::to_cue).collect(),
+            cues,
         }
     }
 
@@ -191,8 +230,19 @@ impl EditorState {
         }
     }
 
+    /// Record the path a Save-as dialog chose.
+    pub fn set_path(&mut self, path: &Path) {
+        self.path = path.to_string_lossy().into_owned();
+    }
+
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status = msg.into();
+    }
+
+    /// A fresh hidden cue id.
+    fn next_id(&mut self) -> String {
+        self.id_counter += 1;
+        format!("cue-{:04}", self.id_counter)
     }
 
     /// Scan `media_root` (recursively, shallow theatre trees) for playable
@@ -211,15 +261,25 @@ impl EditorState {
 
         ui.horizontal(|ui| {
             ui.heading("Show editor");
-            if ui.button("Apply to running show").clicked() {
+            if ui.button(format!("{}  Apply", icon::ARROW_FAT_LINES_UP)).clicked() {
                 action = EditorAction::Apply;
             }
-            if ui.button("Save to file").clicked() {
+            if ui.button(format!("{}  Save", icon::FLOPPY_DISK)).clicked() {
                 action = EditorAction::Save;
             }
-            if ui.button("Close").clicked() {
+            if ui.button(format!("{}  Save as…", icon::FLOPPY_DISK_BACK)).clicked() {
+                action = EditorAction::SaveAs;
+            }
+            if ui.button(format!("{}  Close", icon::X)).clicked() {
                 action = EditorAction::Close;
             }
+        });
+        ui.horizontal(|ui| {
+            ui.small(if self.path.is_empty() {
+                "(unsaved — use Save as…)".to_string()
+            } else {
+                format!("file: {}", self.path)
+            });
         });
         if !self.status.is_empty() {
             ui.colored_label(egui::Color32::from_rgb(220, 140, 60), &self.status);
@@ -227,159 +287,162 @@ impl EditorState {
         ui.separator();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("show_meta")
-                .num_columns(2)
-                .spacing([12.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("Title");
-                    ui.text_edit_singleline(&mut self.title);
-                    ui.end_row();
-
-                    ui.label("Media root");
-                    ui.horizontal(|ui| {
-                        if ui.text_edit_singleline(&mut self.media_root).lost_focus() {
-                            self.refresh_media_files();
-                        }
-                        if ui.button("Rescan").clicked() {
-                            self.refresh_media_files();
-                        }
-                    });
-                    ui.end_row();
-
-                    ui.label("Dropout policy");
-                    egui::ComboBox::from_id_salt("dropout")
-                        .selected_text(format!("{:?}", self.dropout))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.dropout, DropoutPolicy::Continue, "Continue");
-                            ui.selectable_value(&mut self.dropout, DropoutPolicy::Freeze, "Freeze");
-                            ui.selectable_value(&mut self.dropout, DropoutPolicy::Black, "Black");
-                        });
-                    ui.end_row();
-
-                    ui.label("Default fade (ms)");
-                    ui.add(egui::DragValue::new(&mut self.default_fade_ms).range(0..=30_000));
-                    ui.end_row();
-
-                    ui.label("Max drift (ms)");
-                    ui.add(egui::DragValue::new(&mut self.max_drift_ms).range(0..=2000));
-                    ui.end_row();
-
-                    ui.label("Start lead (ms)");
-                    ui.add(egui::DragValue::new(&mut self.start_lead_ms).range(0..=5000));
-                    ui.end_row();
-
-                    ui.label("Rate min / max");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut self.rate_min).speed(0.001).range(0.5..=1.0));
-                        ui.add(egui::DragValue::new(&mut self.rate_max).speed(0.001).range(1.0..=1.5));
-                    });
-                    ui.end_row();
-
-                    ui.label("Hard-seek threshold (ms)");
-                    ui.add(egui::DragValue::new(&mut self.hard_seek_threshold_ms).range(50..=5000));
-                    ui.end_row();
-
-                    ui.label("Sync interval (ms)");
-                    ui.add(egui::DragValue::new(&mut self.sync_interval_ms).range(200..=10_000));
-                    ui.end_row();
-
-                    ui.label("Save path");
-                    ui.text_edit_singleline(&mut self.path);
-                    ui.end_row();
-                });
-
+            self.show_meta(ui);
             ui.separator();
-            ui.horizontal(|ui| {
-                ui.heading(format!("Cues ({})", self.cues.len()));
-                if ui.button("＋ Add cue").clicked() {
-                    let n = self.cues.len() + 1;
-                    self.cues.push(CueDraft {
-                        id: format!("cue-{n:03}"),
-                        name: format!("Cue {n}"),
-                        kind: CueKind::Video,
-                        ..Default::default()
-                    });
-                }
-            });
-
-            let mut op: Option<RowOp> = None;
-            let media_files = self.media_files.clone();
-            for (i, cue) in self.cues.iter_mut().enumerate() {
-                ui.push_id(i, |ui| {
-                    ui.group(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.strong(format!("#{i}"));
-                            if ui.small_button("↑").clicked() {
-                                op = Some(RowOp::MoveUp(i));
-                            }
-                            if ui.small_button("↓").clicked() {
-                                op = Some(RowOp::MoveDown(i));
-                            }
-                            if ui.small_button("⧉ dup").clicked() {
-                                op = Some(RowOp::Duplicate(i));
-                            }
-                            if ui.small_button("🗑 del").clicked() {
-                                op = Some(RowOp::Delete(i));
-                            }
-                        });
-                        egui::Grid::new("cue_grid")
-                            .num_columns(2)
-                            .spacing([10.0, 4.0])
-                            .show(ui, |ui| {
-                                ui.label("ID");
-                                ui.text_edit_singleline(&mut cue.id);
-                                ui.end_row();
-                                ui.label("Name");
-                                ui.text_edit_singleline(&mut cue.name);
-                                ui.end_row();
-                                ui.label("Type");
-                                egui::ComboBox::from_id_salt("kind")
-                                    .selected_text(format!("{:?}", cue.kind))
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut cue.kind, CueKind::Video, "Video");
-                                        ui.selectable_value(&mut cue.kind, CueKind::Image, "Image");
-                                    });
-                                ui.end_row();
-                                ui.label("File");
-                                ui.horizontal(|ui| {
-                                    ui.text_edit_singleline(&mut cue.file);
-                                    egui::ComboBox::from_id_salt("file_pick")
-                                        .selected_text("pick…")
-                                        .show_ui(ui, |ui| {
-                                            for f in &media_files {
-                                                if ui.selectable_label(false, f).clicked() {
-                                                    cue.file = f.clone();
-                                                }
-                                            }
-                                        });
-                                });
-                                ui.end_row();
-                                ui.label("Fade in / out (ms)");
-                                ui.horizontal(|ui| {
-                                    ui.add(egui::DragValue::new(&mut cue.fade_in_ms).range(0..=30_000));
-                                    ui.add(egui::DragValue::new(&mut cue.fade_out_ms).range(0..=30_000));
-                                });
-                                ui.end_row();
-                                ui.label("Crossfade to next (ms)");
-                                ui.add(
-                                    egui::DragValue::new(&mut cue.crossfade_to_next_ms)
-                                        .range(0..=30_000),
-                                );
-                                ui.end_row();
-                                ui.label("Notes");
-                                ui.text_edit_singleline(&mut cue.notes);
-                                ui.end_row();
-                            });
-                    });
-                });
-            }
-
-            if let Some(op) = op {
-                self.apply_row_op(op);
-            }
+            self.show_cue_table(ui);
         });
 
         action
+    }
+
+    /// Top section: global show parameters.
+    fn show_meta(&mut self, ui: &mut egui::Ui) {
+        egui::Grid::new("show_meta")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Title");
+                ui.text_edit_singleline(&mut self.title);
+                ui.end_row();
+
+                ui.label("Media root");
+                ui.horizontal(|ui| {
+                    if ui.text_edit_singleline(&mut self.media_root).lost_focus() {
+                        self.refresh_media_files();
+                    }
+                    if ui.button(format!("{}  Rescan", icon::ARROWS_CLOCKWISE)).clicked() {
+                        self.refresh_media_files();
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Dropout policy");
+                egui::ComboBox::from_id_salt("dropout")
+                    .selected_text(format!("{:?}", self.dropout))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.dropout, DropoutPolicy::Continue, "Continue");
+                        ui.selectable_value(&mut self.dropout, DropoutPolicy::Freeze, "Freeze");
+                        ui.selectable_value(&mut self.dropout, DropoutPolicy::Black, "Black");
+                    });
+                ui.end_row();
+
+                ui.label("Max drift (ms)");
+                ui.add(egui::DragValue::new(&mut self.max_drift_ms).range(0..=2000));
+                ui.end_row();
+
+                ui.label("Start lead (ms)");
+                ui.add(egui::DragValue::new(&mut self.start_lead_ms).range(0..=5000));
+                ui.end_row();
+
+                ui.label("Rate min / max");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut self.rate_min).speed(0.001).range(0.5..=1.0));
+                    ui.add(egui::DragValue::new(&mut self.rate_max).speed(0.001).range(1.0..=1.5));
+                });
+                ui.end_row();
+
+                ui.label("Hard-seek threshold (ms)");
+                ui.add(egui::DragValue::new(&mut self.hard_seek_threshold_ms).range(50..=5000));
+                ui.end_row();
+
+                ui.label("Sync interval (ms)");
+                ui.add(egui::DragValue::new(&mut self.sync_interval_ms).range(200..=10_000));
+                ui.end_row();
+            });
+    }
+
+    /// Bottom section: cues as an editable table with actions on the right.
+    fn show_cue_table(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading(format!("Cues ({})", self.cues.len()));
+            if ui.button(format!("{}  Add cue", icon::PLUS)).clicked() {
+                let n = self.cues.len() + 1;
+                let id = self.next_id();
+                self.cues.push(CueDraft {
+                    id,
+                    name: format!("Cue {n}"),
+                    kind: CueKind::Video,
+                    ..Default::default()
+                });
+            }
+        });
+
+        let mut op: Option<RowOp> = None;
+        let media_files = self.media_files.clone();
+        let n = self.cues.len();
+        egui::Grid::new("cue_table")
+            .num_columns(5)
+            .striped(true)
+            .spacing([10.0, 6.0])
+            .show(ui, |ui| {
+                ui.strong("Name");
+                ui.strong("Type");
+                ui.strong("Source");
+                ui.strong("Fade-in (ms)");
+                ui.strong("");
+                ui.end_row();
+
+                for (i, cue) in self.cues.iter_mut().enumerate() {
+                    ui.add(egui::TextEdit::singleline(&mut cue.name).desired_width(140.0));
+
+                    egui::ComboBox::from_id_salt(("kind", i))
+                        .selected_text(match cue.kind {
+                            CueKind::Video => "Video",
+                            CueKind::Image => "Image",
+                            CueKind::Color => "Color",
+                        })
+                        .width(80.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut cue.kind, CueKind::Video, "Video");
+                            ui.selectable_value(&mut cue.kind, CueKind::Image, "Image");
+                            ui.selectable_value(&mut cue.kind, CueKind::Color, "Color");
+                        });
+
+                    // Source: a colour swatch for colour cues, else file + picker.
+                    if cue.kind == CueKind::Color {
+                        ui.horizontal(|ui| {
+                            ui.color_edit_button_srgb(&mut cue.color);
+                            ui.label(format_hex_color(cue.color));
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut cue.file).desired_width(160.0));
+                            egui::ComboBox::from_id_salt(("file", i))
+                                .selected_text(icon::FOLDER_OPEN.to_string())
+                                .width(24.0)
+                                .show_ui(ui, |ui| {
+                                    for f in &media_files {
+                                        if ui.selectable_label(false, f).clicked() {
+                                            cue.file = f.clone();
+                                        }
+                                    }
+                                });
+                        });
+                    }
+
+                    ui.add(egui::DragValue::new(&mut cue.fade_in_ms).range(0..=30_000));
+
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(i > 0, egui::Button::new(icon::ARROW_UP)).clicked() {
+                            op = Some(RowOp::MoveUp(i));
+                        }
+                        if ui.add_enabled(i + 1 < n, egui::Button::new(icon::ARROW_DOWN)).clicked() {
+                            op = Some(RowOp::MoveDown(i));
+                        }
+                        if ui.button(icon::COPY).clicked() {
+                            op = Some(RowOp::Duplicate(i));
+                        }
+                        if ui.button(icon::TRASH).clicked() {
+                            op = Some(RowOp::Delete(i));
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+
+        if let Some(op) = op {
+            self.apply_row_op(op);
+        }
     }
 
     fn apply_row_op(&mut self, op: RowOp) {
@@ -391,7 +454,7 @@ impl EditorState {
             RowOp::Duplicate(i) => {
                 if let Some(src) = self.cues.get(i).cloned() {
                     let mut dup = src;
-                    dup.id = format!("{}-copy", dup.id);
+                    dup.id = self.next_id();
                     self.cues.insert(i + 1, dup);
                 }
             }
@@ -444,10 +507,18 @@ mod tests {
             name: "Opening".into(),
             kind: CueKind::Image,
             file: PathBuf::from("pic.jpg"),
+            color: None,
             fade_in_ms: 500,
-            fade_out_ms: 250,
-            crossfade_to_next_ms: 1000,
             notes: Some("first".into()),
+        });
+        sf.cues.push(Cue {
+            id: "c2".into(),
+            name: "Black".into(),
+            kind: CueKind::Color,
+            file: PathBuf::new(),
+            color: Some("#101820".into()),
+            fade_in_ms: 1200,
+            notes: None,
         });
 
         let mut ed = EditorState::default();
@@ -455,13 +526,35 @@ mod tests {
         let built = ed.build();
 
         assert_eq!(built.show.title, "Editor Test");
-        assert_eq!(built.cues.len(), 1);
+        assert_eq!(built.cues.len(), 2);
         assert_eq!(built.cues[0].id, "c1");
         assert_eq!(built.cues[0].kind, CueKind::Image);
         assert_eq!(built.cues[0].file, PathBuf::from("pic.jpg"));
-        assert_eq!(built.cues[0].crossfade_to_next_ms, 1000);
-        assert_eq!(built.cues[0].notes.as_deref(), Some("first"));
+        assert_eq!(built.cues[1].kind, CueKind::Color);
+        assert_eq!(built.cues[1].color.as_deref(), Some("#101820"));
+        assert!(built.cues[1].file.as_os_str().is_empty());
         assert_eq!(ed.save_path(), Some(PathBuf::from("/tmp/show.cuemesh.toml")));
+        built.validate().unwrap();
+    }
+
+    #[test]
+    fn build_fills_missing_ids_uniquely() {
+        let mut ed = EditorState::default();
+        ed.enter(None, None);
+        ed.cues.push(CueDraft {
+            id: String::new(),
+            file: "a.mp4".into(),
+            ..Default::default()
+        });
+        ed.cues.push(CueDraft {
+            id: String::new(),
+            file: "b.mp4".into(),
+            ..Default::default()
+        });
+        let built = ed.build();
+        assert_eq!(built.cues.len(), 2);
+        assert_ne!(built.cues[0].id, built.cues[1].id);
+        assert!(!built.cues[0].id.is_empty());
         built.validate().unwrap();
     }
 
@@ -484,7 +577,6 @@ mod tests {
         assert_eq!(ed.cues[1].id, "a");
         ed.apply_row_op(RowOp::Duplicate(0));
         assert_eq!(ed.cues.len(), 3);
-        assert_eq!(ed.cues[1].id, "b-copy");
         ed.apply_row_op(RowOp::Delete(1));
         assert_eq!(ed.cues.len(), 2);
     }

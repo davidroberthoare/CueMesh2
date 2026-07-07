@@ -24,7 +24,7 @@ id = "c1"
 name = "One"
 type = "video"
 file = "one.mp4"
-crossfade_to_next_ms = 800
+fade_in_ms = 800
 "#;
 
 fn now_ms() -> u64 {
@@ -85,7 +85,7 @@ async fn hello_gets_ack_show_sync_and_roster_entry() {
         ControllerMsg::ShowSync(s) => {
             assert_eq!(s.title, "Handshake Test");
             assert_eq!(s.cues.len(), 1);
-            assert_eq!(s.cues[0].crossfade_to_next_ms, 800);
+            assert_eq!(s.cues[0].fade_in_ms, 800);
         }
         other => panic!("expected SHOW_SYNC, got {other:?}"),
     }

@@ -24,7 +24,7 @@ use cuemesh2_shared::protocol::{
     MediaPushProgress, MediaPushResult, MediaReport, MediaReportEntry, Ready, Status, SyncReply,
     PROTOCOL_VERSION,
 };
-use cuemesh2_shared::show::{CueKind, DropoutPolicy};
+use cuemesh2_shared::show::{parse_hex_color, CueKind, DropoutPolicy, DEFAULT_FADE_MS};
 use cuemesh2_shared::{hashing, transfer};
 
 use crate::state::{PlaybackState, SharedState};
@@ -110,10 +110,8 @@ pub async fn run(cfg: ConnectionConfig, state: SharedState, engine: MediaEngine)
 fn apply_dropout_policy(state: &SharedState, engine: &MediaEngine) {
     let (policy, fade_ms) = {
         let s = state.lock().unwrap();
-        match &s.show {
-            Some(show) => (show.dropout_policy, show.default_fade_ms),
-            None => (DropoutPolicy::Continue, 1500),
-        }
+        let policy = s.show.as_ref().map(|sh| sh.dropout_policy).unwrap_or(DropoutPolicy::Continue);
+        (policy, DEFAULT_FADE_MS)
     };
     log(state, format!("controller lost; dropout policy: {policy:?}"));
     match policy {
@@ -461,17 +459,22 @@ fn preload_cue(
     outbound: &mpsc::Sender<ClientMsg>,
 ) {
     let ml = media_layer(c.layer);
-    let full = cfg.media_root.join(&c.file);
-    log(
-        state,
-        format!("{why} {} → layer {:?}  file={}", c.cue_id, c.layer, full.display()),
-    );
-    let kind = match c.kind {
-        CueKind::Video => MediaKind::Video,
-        CueKind::Image => MediaKind::Image,
-    };
     engine.set_alpha(ml, 0.0);
-    match engine.load(ml, &full, kind) {
+    let load_result = match c.kind {
+        CueKind::Video | CueKind::Image => {
+            let full = cfg.media_root.join(&c.file);
+            log(state, format!("{why} {} → layer {:?}  file={}", c.cue_id, c.layer, full.display()));
+            let kind = if c.kind == CueKind::Video { MediaKind::Video } else { MediaKind::Image };
+            engine.load(ml, &full, kind)
+        }
+        CueKind::Color => {
+            let hex = c.color.clone().unwrap_or_else(|| "#000000".into());
+            let rgb = parse_hex_color(&hex);
+            log(state, format!("{why} {} → layer {:?}  color={hex}", c.cue_id, c.layer));
+            engine.load_color(ml, rgb)
+        }
+    };
+    match load_result {
         Ok(_) => {
             {
                 let mut s = state.lock().unwrap();
@@ -628,12 +631,14 @@ async fn handle_controller_msg(
             Ok(_) => {
                 engine.set_alpha(cuemesh2_media::Layer::A, 1.0);
                 engine.set_alpha(cuemesh2_media::Layer::B, 0.0);
+                state.lock().unwrap().testscreen_on = true;
                 log(state, "testscreen on");
             }
             Err(e) => log(state, format!("testscreen failed: {e}")),
         },
         ControllerMsg::HideTestscreen => {
             engine.stop(cuemesh2_media::Layer::A);
+            state.lock().unwrap().testscreen_on = false;
             log(state, "testscreen off");
         }
         ControllerMsg::RequestStatus | ControllerMsg::ReadyCheck => {
