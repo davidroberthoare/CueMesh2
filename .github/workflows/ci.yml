@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           $msi = "gstreamer-1.0-devel-msvc-x86_64-1.24.11.msi"
-          Invoke-WebRequest -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/1.24.11/$msi" -OutFile $msi
+          Invoke-WebRequest -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/1.24.13/msvc/$msi" -OutFile $msi
           Start-Process msiexec.exe -Wait -ArgumentList "/i $msi /qn"
           echo "C:\gstreamer\1.0\msvc_x86_64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 

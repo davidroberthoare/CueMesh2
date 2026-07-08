@@ -17,7 +17,7 @@ $ErrorActionPreference = "Stop"
 
 $ArchiveName  = "cuemesh2-${Version}-x86_64-windows"
 $StagingDir   = "dist/${ArchiveName}"
-$GstUrlBase   = "https://gstreamer.freedesktop.org/data/pkg/windows/${GstVersion}"
+$GstUrlBase   = "https://gstreamer.freedesktop.org/data/pkg/windows/${GstVersion}/msvc"
 $RuntimeMsi   = "gstreamer-1.0-msvc-x86_64-${GstVersion}.msi"
 $GstExtract   = "dist/gst-runtime"
 

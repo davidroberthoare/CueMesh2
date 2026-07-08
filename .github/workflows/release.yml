@@ -7,11 +7,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  GST_VERSION: "1.24.11"
+  GST_VERSION: "1.24.13"
 
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -52,7 +53,7 @@ jobs:
         shell: pwsh
         run: |
           $msi = "gstreamer-1.0-devel-msvc-x86_64-${{ env.GST_VERSION }}.msi"
-          Invoke-WebRequest -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/${{ env.GST_VERSION }}/$msi" -OutFile $msi
+          Invoke-WebRequest -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/${{ env.GST_VERSION }}/msvc/$msi" -OutFile $msi
           Start-Process msiexec.exe -Wait -ArgumentList "/i $msi /qn"
           echo "C:\gstreamer\1.0\msvc_x86_64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
