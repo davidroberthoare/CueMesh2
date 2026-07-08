@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+  GST_VERSION: "1.24.11"
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: x86_64-linux
+
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            suffix: aarch64-linux
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: x86_64-windows
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: macos
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # ── Install GStreamer (development headers for compilation) ──
+
+      - name: Install GStreamer (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - name: Install GStreamer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $msi = "gstreamer-1.0-devel-msvc-x86_64-${{ env.GST_VERSION }}.msi"
+          Invoke-WebRequest -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/${{ env.GST_VERSION }}/$msi" -OutFile $msi
+          Start-Process msiexec.exe -Wait -ArgumentList "/i $msi /qn"
+          echo "C:\gstreamer\1.0\msvc_x86_64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install GStreamer (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly
+          brew install dylibbundler
+
+      # ── Build ──
+
+      - name: Build release (single-arch)
+        if: runner.os != 'macOS'
+        run: cargo build --release
+
+      - name: Build release (macOS universal)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p target/release
+          lipo -create -output target/release/cuemesh2-controller \
+            target/aarch64-apple-darwin/release/cuemesh2-controller \
+            target/x86_64-apple-darwin/release/cuemesh2-controller
+          lipo -create -output target/release/cuemesh2-client \
+            target/aarch64-apple-darwin/release/cuemesh2-client \
+            target/x86_64-apple-darwin/release/cuemesh2-client
+
+      # ── Package ──
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/cuemesh2
+          cp target/release/cuemesh2-controller target/release/cuemesh2-client dist/cuemesh2/
+          tar czf "dist/cuemesh2-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz" -C dist/cuemesh2 .
+
+      - name: Bundle + Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          scripts/bundle-windows.ps1 -Version "${{ github.ref_name }}" -GstVersion "${{ env.GST_VERSION }}"
+
+      - name: Bundle + Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          scripts/bundle-macos.sh "${{ github.ref_name }}"
+
+      # ── Upload ──
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

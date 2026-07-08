@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Bundle cuemesh2 binaries with GStreamer dylibs into a portable .tar.gz
+# for macOS. Requires dylibbundler (brew install dylibbundler).
+set -euo pipefail
+
+VERSION="${1:?usage: $0 <version-tag>}"
+ARCHIVE_NAME="cuemesh2-${VERSION}-macos"
+STAGING="dist/${ARCHIVE_NAME}"
+LIBDIR="${STAGING}/lib"
+PLUGDIR="${STAGING}/plugins"
+BINDIR="${STAGING}"
+
+rm -rf "$STAGING"
+mkdir -p "$LIBDIR" "$PLUGDIR"
+
+echo "==> Copying universal binaries ..."
+cp target/release/cuemesh2-controller "$BINDIR/"
+cp target/release/cuemesh2-client "$BINDIR/"
+
+echo "==> Bundling GStreamer dylibs with dylibbundler ..."
+# -od  = overwrite destination
+# -b   = backup existing (not needed with -od)
+# -x   = fix the given executable
+# -d   = dylib destination directory
+# -p   = path prefix to embed in the binary
+dylibbundler -od -b -x "$BINDIR/cuemesh2-controller" \
+  -d "$LIBDIR" -p @executable_path/../lib/
+dylibbundler -od -b -x "$BINDIR/cuemesh2-client" \
+  -d "$LIBDIR" -p @executable_path/../lib/
+
+echo "==> Copying GStreamer plugins ..."
+GST_PLUGIN_DIR=$(pkg-config --variable=pluginsdir gstreamer-1.0 2>/dev/null \
+  || brew --prefix gstreamer 2>/dev/null)/lib/gstreamer-1.0
+if [ -z "${GST_PLUGIN_DIR}" ]; then
+  # Fallback: find it manually
+  GST_PLUGIN_DIR=$(find /opt/homebrew /usr/local -name "gstreamer-1.0" -type d 2>/dev/null \
+    | head -1)
+fi
+if [ -n "$GST_PLUGIN_DIR" ] && [ -d "$GST_PLUGIN_DIR" ]; then
+  cp -a "$GST_PLUGIN_DIR"/. "$PLUGDIR/"
+else
+  echo "WARNING: could not find GStreamer plugin directory. Plugins not bundled."
+fi
+
+echo "==> Creating launcher scripts ..."
+cat > "$BINDIR/run-controller.sh" << 'SCRIPT'
+#!/bin/bash
+DIR="$(cd "$(dirname "$0")" && pwd)"
+export DYLD_LIBRARY_PATH="$DIR/lib"
+export GST_PLUGIN_PATH="$DIR/plugins"
+exec "$DIR/cuemesh2-controller" "$@"
+SCRIPT
+
+cat > "$BINDIR/run-client.sh" << 'SCRIPT'
+#!/bin/bash
+DIR="$(cd "$(dirname "$0")" && pwd)"
+export DYLD_LIBRARY_PATH="$DIR/lib"
+export GST_PLUGIN_PATH="$DIR/plugins"
+exec "$DIR/cuemesh2-client" "$@"
+SCRIPT
+
+chmod +x "$BINDIR/run-controller.sh" "$BINDIR/run-client.sh"
+
+echo "==> Creating archive ..."
+mkdir -p dist
+tar czf "dist/${ARCHIVE_NAME}.tar.gz" -C "$(dirname "$STAGING")" "$(basename "$STAGING")"
+
+echo "Done: dist/${ARCHIVE_NAME}.tar.gz"
