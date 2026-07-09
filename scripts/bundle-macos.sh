@@ -50,9 +50,9 @@ else
   echo "WARNING: could not find GStreamer plugin directory at ${GST_PLUGIN_DIR}. Plugins not bundled."
 fi
 
-# Ad-hoc codesign so first-launch Gatekeeper behavior is at least
-# consistent (this does not satisfy notarization; users still need to
-# right-click → Open or clear the quarantine flag on an unsigned download).
+# Ad-hoc codesign for consistency. Not a substitute for notarization —
+# see the quarantine-clearing note in the launcher scripts below for why
+# that doesn't matter here.
 echo "==> Ad-hoc signing binaries ..."
 codesign --force --sign - "$BINDIR/cuemesh2-controller"
 codesign --force --sign - "$BINDIR/cuemesh2-client"
@@ -61,6 +61,15 @@ echo "==> Creating launcher scripts ..."
 cat > "$BINDIR/run-controller.sh" << 'SCRIPT'
 #!/bin/bash
 DIR="$(cd "$(dirname "$0")" && pwd)"
+# Downloading + unzipping this archive tags every extracted file with
+# com.apple.quarantine, and without clearing it Gatekeeper prompts
+# separately for the binary AND for each of the ~250 bundled GStreamer
+# dylibs on first launch. Strip it recursively, once, before exec — this
+# script itself isn't Mach-O so it isn't quarantine-gated when run from
+# Terminal, and everything it touches is a file the user already
+# downloaded and owns, so this is just automating what `xattr -d` by hand
+# would do per-file anyway.
+xattr -dr com.apple.quarantine "$DIR" 2>/dev/null || true
 export DYLD_LIBRARY_PATH="$DIR/lib:$DIR/plugins"
 export GST_PLUGIN_PATH="$DIR/plugins"
 exec "$DIR/cuemesh2-controller" "$@"
@@ -69,6 +78,8 @@ SCRIPT
 cat > "$BINDIR/run-client.sh" << 'SCRIPT'
 #!/bin/bash
 DIR="$(cd "$(dirname "$0")" && pwd)"
+# See run-controller.sh for why this is here.
+xattr -dr com.apple.quarantine "$DIR" 2>/dev/null || true
 export DYLD_LIBRARY_PATH="$DIR/lib:$DIR/plugins"
 export GST_PLUGIN_PATH="$DIR/plugins"
 exec "$DIR/cuemesh2-client" "$@"
