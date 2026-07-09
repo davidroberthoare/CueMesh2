@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 /// `CUEMESH_RELEASE_PUBKEY_B64` env var (for organisations building their own
 /// signed distributions) and at runtime via `CUEMESH_UPDATE_PUBKEY` (intended
 /// for tests; a runtime attacker who can set env vars already owns the box).
-pub const DEFAULT_RELEASE_PUBKEY_B64: &str = "KguEca4EKifaMPP79L4rEqW6Loxrlu5P8UUyCiIbjeY=";
+pub const DEFAULT_RELEASE_PUBKEY_B64: &str = "qfq6McGirCodvea+Hm3hixQj1AaHKyVFWSz0PA6hUxE=";
 
 /// Resolve the public key used to verify update artifacts.
 pub fn release_pubkey_b64() -> String {
