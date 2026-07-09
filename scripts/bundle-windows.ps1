@@ -30,6 +30,8 @@ if (-not (Test-Path $RuntimeMsi)) {
 # ── 2. Extract runtime MSI (administrative install — no actual install) ──
 Write-Host "Extracting GStreamer runtime ..."
 Remove-Item -Recurse -Force $GstExtract -ErrorAction SilentlyContinue
+# Resolve-Path fails on paths that don't exist yet — create it first.
+New-Item -ItemType Directory -Path $GstExtract -Force | Out-Null
 $extractDir = Resolve-Path ".\${GstExtract}"
 $proc = Start-Process msiexec.exe -Wait -NoNewWindow -PassThru -ArgumentList @(
   "/a", "`"$(Resolve-Path $RuntimeMsi)`"", "/qn", "TARGETDIR=`"${extractDir}`""

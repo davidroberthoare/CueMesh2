@@ -84,11 +84,20 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           curl -fsSL "https://gstreamer.freedesktop.org/data/pkg/osx/${{ env.GST_VERSION }}/gstreamer-1.0-devel-${{ env.GST_VERSION }}-universal.pkg" -o /tmp/gst-dev.pkg
-          sudo installer -pkg /tmp/gst-dev.pkg -target /
+          sudo installer -verboseR -pkg /tmp/gst-dev.pkg -target /
           # Also install the runtime .pkg (needed for dylib bundling)
           curl -fsSL "https://gstreamer.freedesktop.org/data/pkg/osx/${{ env.GST_VERSION }}/gstreamer-1.0-${{ env.GST_VERSION }}-universal.pkg" -o /tmp/gst-runtime.pkg
-          sudo installer -pkg /tmp/gst-runtime.pkg -target /
+          sudo installer -verboseR -pkg /tmp/gst-runtime.pkg -target /
           brew install dylibbundler
+          # Fail here, with a map of what actually landed, rather than
+          # letting cargo produce a less helpful pkg-config error later.
+          echo "== gstreamer receipts =="
+          pkgutil --pkgs | grep -i gstreamer | head -30 || true
+          echo "== framework layout =="
+          ls /Library/Frameworks/ || true
+          ls /Library/Frameworks/GStreamer.framework/Versions/ || true
+          test -f /Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig/gstreamer-1.0.pc \
+            || { echo "gstreamer-1.0.pc missing after install"; find /Library/Frameworks/GStreamer.framework -maxdepth 3 2>/dev/null | head -40; exit 1; }
 
       # ── Build ──
 
