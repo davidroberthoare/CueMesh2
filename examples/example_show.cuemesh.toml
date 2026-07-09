@@ -31,8 +31,7 @@ name = "Main Video"
 type = "video"
 file = "test1.mp4"
 fade_in_ms = 2000
-in_ms = 30000
-out_ms = 35000
+in_ms = 40000
 loop = false
 on_end = "fade"
 
@@ -65,5 +64,15 @@ type = "video"
 file = "test3.mp4"
 fade_in_ms = 1000
 in_ms = 20000
+loop = false
+on_end = "cut"
+
+[[cues]]
+id = "cue-0003"
+name = "Cue 6"
+type = "image"
+file = "pic1.jpg"
+fade_in_ms = 0
+in_ms = 0
 loop = false
 on_end = "cut"

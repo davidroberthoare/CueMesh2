@@ -44,27 +44,19 @@ Supported platforms:
 | macOS (Intel & Apple Silicon) | Controller + Client          |
 | Linux x86_64 (any PC)         | Controller + Client          |
 | Linux aarch64 (Pi 4/5)        | Controller + Client          |
-| (pending) Linux armv7 (Pi 3)            | Client only (720p30 ceiling) |
+| (pending) Linux armv7 (Pi 3)  | Client only (720p30 ceiling) |
 
 ---
 
 ## Quick start
 
 1. **Install GStreamer** on each machine (runtime dependency — see below).
-2. **Copy your media** to each client (or use the push-media feature).
-3. **Create a show file** (`.cuemesh.toml`) — see `examples/example_show.cuemesh.toml`.
-4. **Run the controller:**
+2. **Run the controller** using the bundled *run-controller.sh* script (or the downloaded binary on linux)
+3. **Create a show file** using the controller GUI or manually following the example in this repo. 
+4. **Run each client:** using the bundled *run-client.sh* script (or the downloaded binary on linux)
+5. **Copy your media** to each client into a folder of your choice (or use the push-media feature).
 
-   ```sh
-   cuemesh2-controller
-   ```
-5. **Run each client:**
-
-   ```sh
-   CUEMESH_NAME="Stage Left" cuemesh2-client
-   ```
-
-   Clients auto-discover the controller on the LAN.
+   Clients auto-discover the controller on the LAN, so you should be able to just play the first cue.
 
 ---
 
