@@ -14,6 +14,9 @@
 //!   `CUEMESH_DRIFT`      — set to `off` to report but never correct drift
 //!                          (debugging aid for playback smoothness)
 //!
+//! Press `F` or `F11` to toggle native OS fullscreen — there's no window
+//! chrome to trigger it from otherwise.
+//!
 //! See `CLAUDE.md` at the workspace root for the design brief.
 
 use cuemesh2_client::{connection, discovery, state, ui, update};

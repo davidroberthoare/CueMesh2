@@ -4,6 +4,10 @@
 //! block naming this client. Controller selection is automatic: the first
 //! mDNS-discovered controller is adopted while offline (manual override via
 //! `CUEMESH_CONTROLLER`).
+//!
+//! There is no window chrome to trigger native OS fullscreen from (no menu
+//! bar, no title bar), so `F` or `F11` toggles it directly — safe to claim
+//! unconditionally since nothing in this UI ever takes text input.
 
 use std::time::Duration;
 
@@ -33,6 +37,16 @@ impl eframe::App for ClientApp {
         // main.rs); this slow tick only keeps the status line fresh when no
         // video is flowing.
         ctx.request_repaint_after(Duration::from_millis(250));
+
+        // Fullscreen toggle. `key_pressed` fires regardless of held
+        // modifiers, so plain F also covers macOS's conventional
+        // Cmd+Ctrl+F chord without a separate check.
+        let toggle_fullscreen =
+            ctx.input(|i| i.key_pressed(egui::Key::F11) || i.key_pressed(egui::Key::F));
+        if toggle_fullscreen {
+            let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fullscreen));
+        }
 
         // ── Pick up a new composited video frame, if one landed ──────────
         if let Some(rgba) = self.engine.latest_frame() {
