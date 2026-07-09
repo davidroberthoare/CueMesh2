@@ -93,7 +93,6 @@ jobs:
           sudo installer -verboseR -pkg /tmp/gst-runtime.pkg -target /
           curl -fsSL "https://gstreamer.freedesktop.org/data/pkg/osx/${{ env.GST_VERSION }}/gstreamer-1.0-devel-${{ env.GST_VERSION }}-universal.pkg" -o /tmp/gst-dev.pkg
           sudo installer -verboseR -pkg /tmp/gst-dev.pkg -target /
-          brew install dylibbundler
           # Fail here, with a map of what actually landed, rather than
           # letting cargo produce a less helpful pkg-config error later.
           echo "== gstreamer receipts =="
