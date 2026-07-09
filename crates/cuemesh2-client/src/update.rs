@@ -178,26 +178,33 @@ pub fn discard_staged() {
 /// Swap the staged binary into place and restart as the new version.
 /// Only returns on error.
 pub fn apply_and_restart(staged: &Path) -> Result<()> {
+    // Capture the executable path BEFORE self-replacing — see restart_self
+    // for why a call made after the replace can't be used to exec.
+    let exe = std::env::current_exe().context("current_exe")?;
     self_replace::self_replace(staged).context("self-replace")?;
     discard_staged();
-    restart_self()
+    restart_self(&exe)
 }
 
 /// Re-exec the (now replaced) current executable with the same arguments.
-/// On unix this replaces the process image; on Windows it spawns a child and
-/// exits, because a running PE cannot exec over itself.
-fn restart_self() -> Result<()> {
-    let exe = std::env::current_exe().context("current_exe")?;
+/// `exe` must be captured before self-replacing: on Linux, self_replace's
+/// atomic rename unlinks the dentry this process was exec'd from, so a
+/// later std::env::current_exe() call resolves via /proc/self/exe to
+/// "<path> (deleted)" — a string that doesn't exist on disk — and exec()
+/// against it fails with ENOENT even though the replace itself already
+/// succeeded. On unix this replaces the process image; on Windows it spawns
+/// a child and exits, because a running PE cannot exec over itself.
+fn restart_self(exe: &Path) -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
-        let err = std::process::Command::new(&exe).args(&args).exec();
+        let err = std::process::Command::new(exe).args(&args).exec();
         bail!("exec failed: {err}");
     }
     #[cfg(not(unix))]
     {
-        std::process::Command::new(&exe)
+        std::process::Command::new(exe)
             .args(&args)
             .spawn()
             .context("spawn replacement")?;

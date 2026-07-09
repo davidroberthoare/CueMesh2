@@ -389,6 +389,19 @@ pub fn restart_into_staged(state: &SharedState) {
             return;
         }
     };
+    // Capture the executable path BEFORE self-replacing: on Linux,
+    // self_replace's atomic rename unlinks the dentry this process was
+    // exec'd from, so a LATER std::env::current_exe() call resolves via
+    // /proc/self/exe to "<path> (deleted)" — a string that doesn't exist
+    // on disk — and exec() against it fails with ENOENT even though the
+    // replace itself already succeeded.
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            log(state, format!("restart failed: current_exe: {e}"));
+            return;
+        }
+    };
     log(state, "restarting into updated controller");
     if let Err(e) = self_replace::self_replace(&staged).context("self-replace") {
         log(state, format!("controller update apply failed: {e:#}"));
@@ -396,30 +409,28 @@ pub fn restart_into_staged(state: &SharedState) {
         return;
     }
     let _ = std::fs::remove_file(&staged);
-    restart_self(state);
+    restart_self(state, &exe);
 }
 
 /// Re-exec the (now replaced) current executable with the same arguments.
-fn restart_self(state: &SharedState) {
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(e) => {
-            log(state, format!("restart failed: {e}"));
-            return;
-        }
-    };
+/// `exe` must be captured before self-replacing — see the call site.
+fn restart_self(state: &SharedState, exe: &Path) {
     let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
-        let err = std::process::Command::new(&exe).args(&args).exec();
+        let err = std::process::Command::new(exe).args(&args).exec();
         log(state, format!("restart exec failed: {err}"));
+        set_self_update(state, SelfUpdate::Failed(format!("restart exec failed: {err}")));
     }
     #[cfg(not(unix))]
     {
-        match std::process::Command::new(&exe).args(&args).spawn() {
+        match std::process::Command::new(exe).args(&args).spawn() {
             Ok(_) => std::process::exit(0),
-            Err(e) => log(state, format!("restart spawn failed: {e}")),
+            Err(e) => {
+                log(state, format!("restart spawn failed: {e}"));
+                set_self_update(state, SelfUpdate::Failed(format!("restart spawn failed: {e}")));
+            }
         }
     }
 }
