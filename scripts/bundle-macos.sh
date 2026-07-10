@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Bundle cuemesh2 binaries with GStreamer dylibs into a portable .tar.gz
+# Bundle multiplex binaries with GStreamer dylibs into a portable .tar.gz
 # for macOS.
 set -euo pipefail
 
 VERSION="${1:?usage: $0 <version-tag>}"
-ARCHIVE_NAME="cuemesh2-${VERSION}-macos"
+ARCHIVE_NAME="multiplex-${VERSION}-macos"
 STAGING="dist/${ARCHIVE_NAME}"
 LIBDIR="${STAGING}/lib"
 PLUGDIR="${STAGING}/plugins"
@@ -14,8 +14,8 @@ rm -rf "$STAGING"
 mkdir -p "$LIBDIR" "$PLUGDIR"
 
 echo "==> Copying universal binaries ..."
-cp target/release/cuemesh2-controller "$BINDIR/"
-cp target/release/cuemesh2-client "$BINDIR/"
+cp target/release/multiplex-controller "$BINDIR/"
+cp target/release/multiplex-client "$BINDIR/"
 
 # Versions/1.0 is where the .pkg actually installs; the Versions/Current
 # symlink is not reliably present on CI runners.
@@ -54,8 +54,8 @@ fi
 # see the quarantine-clearing note in the launcher scripts below for why
 # that doesn't matter here.
 echo "==> Ad-hoc signing binaries ..."
-codesign --force --sign - "$BINDIR/cuemesh2-controller"
-codesign --force --sign - "$BINDIR/cuemesh2-client"
+codesign --force --sign - "$BINDIR/multiplex-controller"
+codesign --force --sign - "$BINDIR/multiplex-client"
 
 echo "==> Creating launcher scripts ..."
 cat > "$BINDIR/run-controller.sh" << 'SCRIPT'
@@ -72,7 +72,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 xattr -dr com.apple.quarantine "$DIR" 2>/dev/null || true
 export DYLD_LIBRARY_PATH="$DIR/lib:$DIR/plugins"
 export GST_PLUGIN_PATH="$DIR/plugins"
-exec "$DIR/cuemesh2-controller" "$@"
+exec "$DIR/multiplex-controller" "$@"
 SCRIPT
 
 cat > "$BINDIR/run-client.sh" << 'SCRIPT'
@@ -82,7 +82,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 xattr -dr com.apple.quarantine "$DIR" 2>/dev/null || true
 export DYLD_LIBRARY_PATH="$DIR/lib:$DIR/plugins"
 export GST_PLUGIN_PATH="$DIR/plugins"
-exec "$DIR/cuemesh2-client" "$@"
+exec "$DIR/multiplex-client" "$@"
 SCRIPT
 
 chmod +x "$BINDIR/run-controller.sh" "$BINDIR/run-client.sh"

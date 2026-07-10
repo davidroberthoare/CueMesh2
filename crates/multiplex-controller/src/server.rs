@@ -9,11 +9,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
-use cuemesh2_shared::protocol::{
+use multiplex_shared::protocol::{
     ClientMsg, ClientState, ControllerMsg, Envelope, HelloAck, Layer, LoadCue, ShowSync,
     PROTOCOL_VERSION,
 };
-use cuemesh2_shared::show::Cue;
+use multiplex_shared::show::Cue;
 
 use crate::state::{ClientRow, Outgoing, SharedState};
 
@@ -156,7 +156,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, state: SharedState) ->
     let ack = Envelope::new(
         now_utc_ms(),
         ControllerMsg::HelloAck(HelloAck {
-            controller_name: "cuemesh2-controller".into(),
+            controller_name: "multiplex-controller".into(),
             protocol_version: PROTOCOL_VERSION,
         }),
     );
@@ -259,7 +259,7 @@ fn handle_client_msg(state: &SharedState, client_id: &str, env: Envelope<ClientM
         }
         ClientMsg::SyncReply(reply) => {
             let t4 = now_utc_ms();
-            let offset = cuemesh2_shared::clock_sync::compute_offset(
+            let offset = multiplex_shared::clock_sync::compute_offset(
                 reply.t1_utc_ms,
                 reply.t2_local_ms,
                 reply.t3_local_ms,
@@ -275,7 +275,7 @@ fn handle_client_msg(state: &SharedState, client_id: &str, env: Envelope<ClientM
             let n_ok = report
                 .entries
                 .iter()
-                .filter(|e| e.status == cuemesh2_shared::protocol::MediaFileStatus::Ok)
+                .filter(|e| e.status == multiplex_shared::protocol::MediaFileStatus::Ok)
                 .count();
             let total = report.entries.len();
             if let Some(row) = st.clients.get_mut(client_id) {
@@ -303,7 +303,7 @@ fn handle_client_msg(state: &SharedState, client_id: &str, env: Envelope<ClientM
                 row.push_progress = None;
                 if r.ok {
                     row.preflight
-                        .insert(r.rel_path.clone(), cuemesh2_shared::protocol::MediaFileStatus::Ok);
+                        .insert(r.rel_path.clone(), multiplex_shared::protocol::MediaFileStatus::Ok);
                 }
             }
             let verdict = if r.ok {

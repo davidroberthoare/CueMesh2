@@ -6,12 +6,12 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
-use cuemesh2_shared::protocol::{ClientState, ControllerMsg, Layer, MediaFileSpec, MediaFileStatus};
-use cuemesh2_shared::show::ShowFile;
-use cuemesh2_shared::update::UpdateManifest;
+use multiplex_shared::protocol::{ClientState, ControllerMsg, Layer, MediaFileSpec, MediaFileStatus};
+use multiplex_shared::show::ShowFile;
+use multiplex_shared::update::UpdateManifest;
 
 /// What the per-client writer task can send: JSON envelopes or raw binary
-/// media chunks (already framed by `cuemesh2_shared::transfer`).
+/// media chunks (already framed by `multiplex_shared::transfer`).
 #[derive(Debug, Clone)]
 pub enum Outgoing {
     Msg(ControllerMsg),

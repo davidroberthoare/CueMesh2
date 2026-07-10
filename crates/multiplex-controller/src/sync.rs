@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use cuemesh2_shared::protocol::{ControllerMsg, SyncPing};
+use multiplex_shared::protocol::{ControllerMsg, SyncPing};
 
 use crate::server::now_utc_ms;
 use crate::state::{Outgoing, SharedState};

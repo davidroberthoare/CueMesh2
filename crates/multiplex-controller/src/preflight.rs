@@ -10,11 +10,11 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cuemesh2_shared::protocol::{
+use multiplex_shared::protocol::{
     ControllerMsg, MediaCheck, MediaFileSpec, MediaFileStatus, MediaPushBegin, MediaPushEnd,
 };
-use cuemesh2_shared::show::ShowFile;
-use cuemesh2_shared::{hashing, transfer};
+use multiplex_shared::show::ShowFile;
+use multiplex_shared::{hashing, transfer};
 
 use crate::server::{broadcast, client_queue, log};
 use crate::state::{Outgoing, SharedState};
@@ -185,7 +185,7 @@ async fn push_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cuemesh2_shared::show::{Cue, CueKind};
+    use multiplex_shared::show::{Cue, CueKind};
 
     fn cue(id: &str, file: &str) -> Cue {
         Cue {
@@ -198,14 +198,14 @@ mod tests {
             in_ms: 0,
             out_ms: None,
             loops: false,
-            on_end: cuemesh2_shared::show::EndAction::default(),
+            on_end: multiplex_shared::show::EndAction::default(),
             notes: None,
         }
     }
 
     #[test]
     fn hash_show_media_dedupes_and_reports_missing() {
-        let dir = std::env::temp_dir().join("cuemesh2_preflight_test");
+        let dir = std::env::temp_dir().join("multiplex_preflight_test");
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("a.mp4"), b"content-a").unwrap();
 

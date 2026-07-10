@@ -1,4 +1,4 @@
-//! Two-layer GStreamer video engine for CueMesh2 clients.
+//! Two-layer GStreamer video engine for MultiPlex clients.
 //!
 //! A persistent display pipeline composites two `intervideosrc` channels;
 //! each layer is fed by an independent producer pipeline (file decoder,
@@ -13,7 +13,7 @@ pub mod pipeline;
 
 pub use pipeline::{Canvas, MediaEngine, MediaError, MediaEvent, MediaKind};
 
-pub use cuemesh2_shared::protocol::Layer;
+pub use multiplex_shared::protocol::Layer;
 
 /// The GStreamer runtime's (major, minor) version. Used by the auto-updater
 /// to refuse a client binary that needs a newer runtime than is installed.

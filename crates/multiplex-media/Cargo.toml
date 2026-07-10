@@ -1,14 +1,14 @@
 [package]
-name = "cuemesh2-media"
+name = "multiplex-media"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "GStreamer-backed two-layer video compositor pipeline for CueMesh2 clients."
+description = "GStreamer-backed two-layer video compositor pipeline for MultiPlex clients."
 
 [dependencies]
-cuemesh2-shared = { workspace = true }
+multiplex-shared = { workspace = true }
 gstreamer = { workspace = true }
 gstreamer-video = { workspace = true }
 gstreamer-app = { workspace = true }

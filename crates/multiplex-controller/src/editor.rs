@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use egui_phosphor::regular as icon;
 
-use cuemesh2_shared::show::{
+use multiplex_shared::show::{
     format_hex_color, parse_hex_color, Cue, CueKind, DropoutPolicy, EndAction, Poster, Show,
     ShowFile, SyncConfig, SyncCorrection,
 };

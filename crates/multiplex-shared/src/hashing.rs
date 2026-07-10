@@ -45,7 +45,7 @@ mod tests {
 
     #[test]
     fn known_hash_of_empty_file() {
-        let tmp = std::env::temp_dir().join("cuemesh2_hash_test_empty");
+        let tmp = std::env::temp_dir().join("multiplex_hash_test_empty");
         std::fs::write(&tmp, b"").unwrap();
         let h = sha256_file(&tmp).unwrap();
         assert_eq!(
@@ -57,7 +57,7 @@ mod tests {
 
     #[test]
     fn known_hash_of_abc() {
-        let tmp = std::env::temp_dir().join("cuemesh2_hash_test_abc");
+        let tmp = std::env::temp_dir().join("multiplex_hash_test_abc");
         std::fs::write(&tmp, b"abc").unwrap();
         let h = sha256_file(&tmp).unwrap();
         assert_eq!(

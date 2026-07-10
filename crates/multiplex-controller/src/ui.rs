@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use egui_file_dialog::FileDialog;
 use egui_phosphor::regular as icon;
 
-use cuemesh2_shared::protocol::{ControllerMsg, FadeCmd, Layer, MediaFileStatus, PlayAt};
-use cuemesh2_shared::show::{CueKind, ShowFile};
+use multiplex_shared::protocol::{ControllerMsg, FadeCmd, Layer, MediaFileStatus, PlayAt};
+use multiplex_shared::show::{CueKind, ShowFile};
 
 use crate::editor::{EditorAction, EditorState};
 use crate::preflight;
@@ -66,9 +66,9 @@ impl ControllerApp {
             open_dialog: show_dialog(),
             save_dialog: show_dialog(),
         };
-        // Auto-load the show named by CUEMESH_SHOW so headless-ish setups
+        // Auto-load the show named by MULTIPLEX_SHOW so headless-ish setups
         // (and operators with a fixed show) skip the open dialog entirely.
-        if let Ok(p) = std::env::var("CUEMESH_SHOW") {
+        if let Ok(p) = std::env::var("MULTIPLEX_SHOW") {
             app.load_show_from_path(PathBuf::from(p));
         }
         app
@@ -208,7 +208,7 @@ impl ControllerApp {
         broadcast(
             &self.state,
             ControllerMsg::Fade(FadeCmd {
-                duration_ms: cuemesh2_shared::show::DEFAULT_FADE_MS,
+                duration_ms: multiplex_shared::show::DEFAULT_FADE_MS,
             }),
         );
     }
@@ -382,7 +382,7 @@ impl eframe::App for ControllerApp {
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("CueMesh2 Controller");
+                ui.heading("MultiPlex Controller");
                 ui.separator();
                 ui.label(show_summary);
                 ui.separator();

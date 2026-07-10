@@ -365,7 +365,7 @@ crossfade_to_next_ms = 500
             on_end: EndAction::default(),
             notes: None,
         });
-        let tmp = std::env::temp_dir().join("cuemesh2_show_roundtrip.cuemesh.toml");
+        let tmp = std::env::temp_dir().join("multiplex_show_roundtrip.cuemesh.toml");
         sf.save(&tmp).unwrap();
         let back = ShowFile::load(&tmp).unwrap();
         assert_eq!(back.show.title, "Roundtrip");

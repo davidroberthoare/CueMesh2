@@ -39,7 +39,7 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use tokio::sync::broadcast;
 
-use cuemesh2_shared::protocol::Layer;
+use multiplex_shared::protocol::Layer;
 
 /// Errors returned by the media engine.
 #[derive(Debug, thiserror::Error)]
@@ -108,7 +108,7 @@ impl Default for Canvas {
         // matters less than per-frame cost — a 1080p canvas more than doubles
         // the software convert + texture upload for no visible benefit, and
         // upscales what is typically 720p source media. Shows that want 1080p
-        // can pass an explicit canvas (client: CUEMESH_CANVAS=1920x1080@30).
+        // can pass an explicit canvas (client: MULTIPLEX_CANVAS=1920x1080@30).
         Self {
             width: 1280,
             height: 720,
@@ -226,7 +226,7 @@ impl SinkStats {
             // least half an extra frame interval.
             let gaps = d.iter().filter(|&&v| v > self.expected_ms * 1.5).count();
             tracing::info!(
-                target: "cuemesh2_media::framestats",
+                target: "multiplex_media::framestats",
                 n,
                 fps = format!("{:.2}", 1000.0 / avg),
                 avg_ms = format!("{avg:.2}"),
@@ -269,7 +269,7 @@ impl MediaEngine {
     pub fn with_canvas(canvas: Canvas) -> Result<Self, MediaError> {
         ensure_init()?;
 
-        let display = gst::Pipeline::with_name("cuemesh2-display");
+        let display = gst::Pipeline::with_name("multiplex-display");
 
         let compositor = make("compositor", Some("comp"))?;
         compositor.set_property_from_str("background", "black");
@@ -341,20 +341,20 @@ impl MediaEngine {
     ///
     /// Default: an `appsink` that delivers RGBA frames into `latest_frame`
     /// for embedding in the eframe window. Override with
-    /// `CUEMESH_VIDEO_SINK=<factory>` to get a real video window (useful
+    /// `MULTIPLEX_VIDEO_SINK=<factory>` to get a real video window (useful
     /// for the standalone media examples and for debugging).
     fn make_display_sink(
         latest: Arc<Mutex<Option<Vec<u8>>>>,
         notify: FrameNotify,
         canvas: &Canvas,
     ) -> Result<gst::Element, MediaError> {
-        if let Ok(name) = std::env::var("CUEMESH_VIDEO_SINK") {
+        if let Ok(name) = std::env::var("MULTIPLEX_VIDEO_SINK") {
             let name = name.trim();
             let sink = gst::ElementFactory::make(name)
                 .name("vsink")
                 .build()
                 .map_err(|_| {
-                    MediaError::ElementFactory(format!("CUEMESH_VIDEO_SINK '{name}' unavailable"))
+                    MediaError::ElementFactory(format!("MULTIPLEX_VIDEO_SINK '{name}' unavailable"))
                 })?;
             tracing::info!(factory = %name, "display sink (env override)");
             return Ok(sink);
@@ -493,7 +493,7 @@ impl MediaEngine {
     /// Show an SMPTE test pattern on `layer` (replaces any loaded media and
     /// starts immediately; caller sets alpha).
     pub fn load_testscreen(&self, layer: Layer) -> Result<(), MediaError> {
-        let pipeline = gst::Pipeline::with_name(&format!("cuemesh2-test-{layer:?}"));
+        let pipeline = gst::Pipeline::with_name(&format!("multiplex-test-{layer:?}"));
         let src = make("videotestsrc", None)?;
         src.set_property("is-live", true);
         src.set_property_from_str("pattern", "smpte");
@@ -518,7 +518,7 @@ impl MediaEngine {
     /// STANDBY/PLAY_AT and alpha crossfades work uniformly. Used for fades to
     /// black/white. `rgb` is the fill colour.
     pub fn load_color(&self, layer: Layer, rgb: [u8; 3]) -> Result<(), MediaError> {
-        let pipeline = gst::Pipeline::with_name(&format!("cuemesh2-color-{layer:?}"));
+        let pipeline = gst::Pipeline::with_name(&format!("multiplex-color-{layer:?}"));
         let src = make("videotestsrc", None)?;
         // Non-live so it prerolls a frame in PAUSED, exactly like the image and
         // video producers; the sink clock still paces delivery to the canvas fps.
@@ -603,7 +603,7 @@ impl MediaEngine {
         uri: &str,
         kind: MediaKind,
     ) -> Result<gst::Pipeline, MediaError> {
-        let pipeline = gst::Pipeline::with_name(&format!("cuemesh2-producer-{name}"));
+        let pipeline = gst::Pipeline::with_name(&format!("multiplex-producer-{name}"));
 
         let decode = make("uridecodebin", Some("decode"))?;
         decode.set_property("uri", uri);
@@ -639,7 +639,7 @@ impl MediaEngine {
         };
 
         // Route decoded pads: first video pad into the chain, everything else
-        // (audio) into a throwaway fakesink — CueMesh2 is video-only, but an
+        // (audio) into a throwaway fakesink — MultiPlex is video-only, but an
         // unlinked decoder pad would error the pipeline.
         let head_weak = chain_head.downgrade();
         let pipeline_weak = pipeline.downgrade();
@@ -1005,7 +1005,7 @@ impl MediaEngine {
     fn spawn_display_bus_watch(&self) {
         let Some(bus) = self.inner.display.bus() else { return };
         std::thread::Builder::new()
-            .name("cuemesh2-display-bus".into())
+            .name("multiplex-display-bus".into())
             .spawn(move || {
                 for msg in bus.iter_timed(gst::ClockTime::NONE) {
                     use gst::MessageView as M;
@@ -1042,7 +1042,7 @@ impl MediaEngine {
         let tx = self.inner.events_tx.clone();
         let loop_pipeline = pipeline.clone();
         std::thread::Builder::new()
-            .name("cuemesh2-producer-bus".into())
+            .name("multiplex-producer-bus".into())
             .spawn(move || {
                 while !shutdown.load(Ordering::SeqCst) {
                     let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(300)) else {

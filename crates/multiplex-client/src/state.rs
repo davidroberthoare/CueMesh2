@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use cuemesh2_shared::protocol::{ClientState, ShowSync};
-use cuemesh2_shared::show::EndAction;
+use multiplex_shared::protocol::{ClientState, ShowSync};
+use multiplex_shared::show::EndAction;
 
 #[derive(Debug, Default)]
 pub struct AppState {
@@ -25,7 +25,7 @@ pub struct AppState {
     /// as measured by the controller and echoed in SYNC pings.
     pub clock_offset_ms: Option<i64>,
     /// Rolling median over recent controller-measured offsets.
-    pub offset_filter: Option<cuemesh2_shared::clock_sync::OffsetFilter>,
+    pub offset_filter: Option<multiplex_shared::clock_sync::OffsetFilter>,
     /// Last playback drift measurement (positive = ahead of master).
     pub last_drift_ms: Option<i64>,
     pub playback: ClientPlayback,
@@ -92,10 +92,10 @@ impl From<PlaybackState> for ClientState {
 }
 
 impl AppState {
-    pub fn layer_mut(&mut self, layer: cuemesh2_shared::protocol::Layer) -> &mut LayerInfo {
+    pub fn layer_mut(&mut self, layer: multiplex_shared::protocol::Layer) -> &mut LayerInfo {
         match layer {
-            cuemesh2_shared::protocol::Layer::A => &mut self.playback.layer_a,
-            cuemesh2_shared::protocol::Layer::B => &mut self.playback.layer_b,
+            multiplex_shared::protocol::Layer::A => &mut self.playback.layer_a,
+            multiplex_shared::protocol::Layer::B => &mut self.playback.layer_b,
         }
     }
 

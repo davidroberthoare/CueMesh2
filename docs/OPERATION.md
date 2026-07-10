@@ -1,9 +1,9 @@
-# CueMesh2 — Operator Quickstart
+# MultiPlex — Operator Quickstart
 
 This is the hands-on guide for running a show. For the design and internals,
 see `CLAUDE.md`; for what has been built and why, see `docs/PROGRESS.md`.
 
-CueMesh2 has two programs:
+MultiPlex has two programs:
 
 - **Controller** — the operator's machine. Runs the show, holds the cue list,
   and is the hub every client connects to.
@@ -18,7 +18,7 @@ Everything is LAN-only and offline. No internet, no accounts, no cloud.
 ## 1. Stage the media
 
 Each client plays files from its own **media root** (default
-`~/cuemesh_media`, override with the `CUEMESH_MEDIA_ROOT` environment
+`~/cuemesh_media`, override with the `MULTIPLEX_MEDIA_ROOT` environment
 variable). Cues in the show file reference files **relative to that root**, so
 the same show works on every machine regardless of where its media lives.
 
@@ -38,27 +38,27 @@ step 4.
 On the controller machine:
 
 ```sh
-cuemesh2-controller
+multiplex-controller
 ```
 
 Optionally point it at a show on startup:
 
 ```sh
-CUEMESH_SHOW=~/shows/mynight.cuemesh.toml cuemesh2-controller
+MULTIPLEX_SHOW=~/shows/mynight.cuemesh.toml multiplex-controller
 ```
 
 On each client machine:
 
 ```sh
-cuemesh2-client
+multiplex-client
 ```
 
 Useful client environment variables:
 
-- `CUEMESH_CONTROLLER` — controller URL, e.g. `ws://192.168.1.10:9420`
+- `MULTIPLEX_CONTROLLER` — controller URL, e.g. `ws://192.168.1.10:9420`
   (default `ws://127.0.0.1:9420` for single-box mode).
-- `CUEMESH_NAME` — the name shown in the controller's client roster.
-- `CUEMESH_MEDIA_ROOT` — where this client's media lives.
+- `MULTIPLEX_NAME` — the name shown in the controller's client roster.
+- `MULTIPLEX_MEDIA_ROOT` — where this client's media lives.
 
 Clients find the controller automatically over the LAN (mDNS): open the
 client window and pick the controller from the discovered list, or type its

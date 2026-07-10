@@ -5,10 +5,10 @@
 //! One test function on purpose: the staged slot and the pubkey env var are
 //! process-global.
 
-use cuemesh2_client::update::{
+use multiplex_client::update::{
     discard_staged, stage, staged_bin_path, staged_version, take_staged, StagedMeta,
 };
-use cuemesh2_shared::{hashing, update as shared_update};
+use multiplex_shared::{hashing, update as shared_update};
 
 /// Fixed test seed — NOT the release key.
 const TEST_PRIV: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
@@ -32,7 +32,7 @@ fn write_tmp(name: &str, data: &[u8]) -> std::path::PathBuf {
 #[test]
 fn stage_verify_and_discard_lifecycle() {
     std::env::set_var(
-        "CUEMESH_UPDATE_PUBKEY",
+        "MULTIPLEX_UPDATE_PUBKEY",
         shared_update::pubkey_of(TEST_PRIV).unwrap(),
     );
     discard_staged(); // clean slate

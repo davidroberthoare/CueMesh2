@@ -1,10 +1,10 @@
 //! Manual smoke test: play a file on layer A for a few seconds.
 //!
-//! Usage: cargo run -p cuemesh2-media --example play_file -- <path> [seconds]
+//! Usage: cargo run -p multiplex-media --example play_file -- <path> [seconds]
 
 use std::time::Duration;
 
-use cuemesh2_media::{Layer, MediaEngine, MediaKind};
+use multiplex_media::{Layer, MediaEngine, MediaKind};
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()

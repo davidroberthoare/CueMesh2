@@ -8,7 +8,7 @@ use std::time::Duration;
 use gstreamer::prelude::*;
 use tokio::time;
 
-use cuemesh2_shared::protocol::Layer;
+use multiplex_shared::protocol::Layer;
 
 use crate::pipeline::MediaEngine;
 

@@ -1,5 +1,5 @@
-//! CueMesh2 client library: controller connection, media dispatch, status UI.
-//! The `cuemesh2-client` binary is a thin wrapper; the split exists so
+//! MultiPlex client library: controller connection, media dispatch, status UI.
+//! The `multiplex-client` binary is a thin wrapper; the split exists so
 //! integration tests can exercise the connection logic directly.
 
 pub mod connection;

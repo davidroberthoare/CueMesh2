@@ -1,19 +1,19 @@
 [package]
-name = "cuemesh2-client"
+name = "multiplex-client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CueMesh2 client: connects to a controller and drives the local GStreamer pipeline."
+description = "MultiPlex client: connects to a controller and drives the local GStreamer pipeline."
 
 [[bin]]
-name = "cuemesh2-client"
+name = "multiplex-client"
 path = "src/main.rs"
 
 [dependencies]
-cuemesh2-shared = { workspace = true }
-cuemesh2-media = { workspace = true }
+multiplex-shared = { workspace = true }
+multiplex-media = { workspace = true }
 
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }

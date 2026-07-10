@@ -9,12 +9,12 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
-use cuemesh2_controller::state::ClientUpdate;
-use cuemesh2_controller::{server, state, update};
-use cuemesh2_shared::protocol::{
+use multiplex_controller::state::ClientUpdate;
+use multiplex_controller::{server, state, update};
+use multiplex_shared::protocol::{
     ClientMsg, ControllerMsg, Envelope, Hello, UpdatePushResult, PROTOCOL_VERSION,
 };
-use cuemesh2_shared::{hashing, transfer, update as shared_update};
+use multiplex_shared::{hashing, transfer, update as shared_update};
 
 /// Fixed test seed — NOT the release key.
 const TEST_PRIV: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
@@ -52,7 +52,7 @@ async fn recv_msg(
 #[tokio::test]
 async fn push_update_streams_verified_binary_and_apply_follows() {
     // ── Signed test bundle in a temp dir ──────────────────────────────────
-    let bundle = std::env::temp_dir().join(format!("cuemesh2_update_push_{}", std::process::id()));
+    let bundle = std::env::temp_dir().join(format!("multiplex_update_push_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&bundle);
     std::fs::create_dir_all(&bundle).unwrap();
 
@@ -73,8 +73,8 @@ async fn push_update_streams_verified_binary_and_apply_follows() {
     .unwrap();
 
     // Process-global env: this file has exactly one test, so no races.
-    std::env::set_var("CUEMESH_UPDATE_BUNDLE", &bundle);
-    std::env::set_var("CUEMESH_UPDATE_PUBKEY", &pubkey);
+    std::env::set_var("MULTIPLEX_UPDATE_BUNDLE", &bundle);
+    std::env::set_var("MULTIPLEX_UPDATE_PUBKEY", &pubkey);
 
     // ── Controller with the bundle loaded ─────────────────────────────────
     let state = state::shared();

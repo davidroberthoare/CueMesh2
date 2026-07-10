@@ -1,4 +1,4 @@
-# CueMesh2
+# MultiPlex
 
 **Synchronised video playback for tiny theatres, on a budget.**
 
@@ -62,7 +62,7 @@ Supported platforms:
 
 ## GStreamer install
 
-CueMesh2 uses GStreamer for all media playback. It's **not** statically linked,
+MultiPlex uses GStreamer for all media playback. It's **not** statically linked,
 so you need the runtime:
 
 - **Linux (Debian/Ubuntu/Pi OS):**
@@ -103,15 +103,15 @@ See `examples/example_show.cuemesh.toml` for a real example.
 ## Building from source
 
 ```sh
-git clone https://github.com/davidroberthoare/CueMesh2
-cd CueMesh2
+git clone https://github.com/davidroberthoare/multiplex
+cd multiplex
 cargo build --release
 ```
 
 Binaries end up in `target/release/`:
 
-- `cuemesh2-controller`
-- `cuemesh2-client`
+- `multiplex-controller`
+- `multiplex-client`
 
 ---
 
@@ -131,7 +131,7 @@ itself behind your back, and clients never need internet:
    touched. You then click **Apply** (per client or fleet-wide) when nothing
    is on stage; a client that is playing politely refuses.
 
-The updater only swaps the CueMesh binaries. On Windows/macOS, a release that
+The updater only swaps the MultiPlex binaries. On Windows/macOS, a release that
 needs a newer bundled GStreamer runtime will tell you to reinstall instead.
 
 ---
@@ -146,7 +146,7 @@ it and the software decoder is too slow for smooth playback.
 
 ## Shout-out to the open-source libraries that make this possible
 
-CueMesh2 is built on the shoulders of many excellent projects. Thank you!
+MultiPlex is built on the shoulders of many excellent projects. Thank you!
 
 - [**Rust**](https://www.rust-lang.org/) — the language
 - [**GStreamer**](https://gstreamer.freedesktop.org/) — the media engine that does all the actual work (decoding, compositing, crossfading)

@@ -17,17 +17,17 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
-use cuemesh2_media::{fades, MediaEngine, MediaEvent, MediaKind};
-use cuemesh2_shared::clock_sync::{correction_for, Correction, CorrectionParams, OffsetFilter};
-use cuemesh2_shared::protocol::{
+use multiplex_media::{fades, MediaEngine, MediaEvent, MediaKind};
+use multiplex_shared::clock_sync::{correction_for, Correction, CorrectionParams, OffsetFilter};
+use multiplex_shared::protocol::{
     ClientMsg, ControllerMsg, Envelope, Hello, Layer as WireLayer, LoadCue, MediaFileStatus,
     MediaPushProgress, MediaPushResult, MediaReport, MediaReportEntry, Ready, Status, SyncReply,
     UpdateApplyResult, UpdatePushResult, PROTOCOL_VERSION,
 };
-use cuemesh2_shared::show::{
+use multiplex_shared::show::{
     parse_hex_color, CueKind, DropoutPolicy, EndAction, Poster, DEFAULT_FADE_MS,
 };
-use cuemesh2_shared::{hashing, transfer};
+use multiplex_shared::{hashing, transfer};
 
 use crate::state::{PlaybackState, SharedState};
 use crate::update;
@@ -60,10 +60,10 @@ pub struct ConnectionConfig {
     pub media_root: PathBuf,
 }
 
-fn media_layer(l: WireLayer) -> cuemesh2_media::Layer {
+fn media_layer(l: WireLayer) -> multiplex_media::Layer {
     match l {
-        WireLayer::A => cuemesh2_media::Layer::A,
-        WireLayer::B => cuemesh2_media::Layer::B,
+        WireLayer::A => multiplex_media::Layer::A,
+        WireLayer::B => multiplex_media::Layer::B,
     }
 }
 
@@ -122,8 +122,8 @@ fn apply_dropout_policy(state: &SharedState, engine: &MediaEngine) {
         DropoutPolicy::Freeze => engine.pause_all(),
         DropoutPolicy::Black => {
             let dur = Duration::from_millis(fade_ms as u64);
-            fades::fade(engine, cuemesh2_media::Layer::A, 0.0, dur);
-            fades::fade(engine, cuemesh2_media::Layer::B, 0.0, dur);
+            fades::fade(engine, multiplex_media::Layer::A, 0.0, dur);
+            fades::fade(engine, multiplex_media::Layer::B, 0.0, dur);
             let engine = engine.clone();
             let state = state.clone();
             tokio::spawn(async move {
@@ -262,14 +262,14 @@ fn spawn_status_loop(
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(1000));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // Debug kill switch: CUEMESH_DRIFT=off measures and reports drift but
+        // Debug kill switch: MULTIPLEX_DRIFT=off measures and reports drift but
         // never touches playback, to isolate the corrector when hunting
         // smoothness problems.
-        let corrections_enabled = std::env::var("CUEMESH_DRIFT")
+        let corrections_enabled = std::env::var("MULTIPLEX_DRIFT")
             .map(|v| !v.eq_ignore_ascii_case("off"))
             .unwrap_or(true);
         if !corrections_enabled {
-            tracing::warn!("CUEMESH_DRIFT=off — drift is reported but never corrected");
+            tracing::warn!("MULTIPLEX_DRIFT=off — drift is reported but never corrected");
         }
         // Rate currently applied per layer, to avoid re-seeking every tick.
         let mut applied_rate: HashMap<WireLayer, f64> = HashMap::new();
@@ -282,11 +282,11 @@ fn spawn_status_loop(
             let (pb, offset, params) = {
                 let mut s = state.lock().unwrap();
                 s.playback.position_ms = engine
-                    .position_ms(cuemesh2_media::Layer::A)
-                    .or_else(|| engine.position_ms(cuemesh2_media::Layer::B))
+                    .position_ms(multiplex_media::Layer::A)
+                    .or_else(|| engine.position_ms(multiplex_media::Layer::B))
                     .unwrap_or(0);
-                s.playback.layer_a_alpha = engine.alpha(cuemesh2_media::Layer::A) as f32;
-                s.playback.layer_b_alpha = engine.alpha(cuemesh2_media::Layer::B) as f32;
+                s.playback.layer_a_alpha = engine.alpha(multiplex_media::Layer::A) as f32;
+                s.playback.layer_b_alpha = engine.alpha(multiplex_media::Layer::B) as f32;
                 let params = s
                     .show
                     .as_ref()
@@ -410,7 +410,7 @@ fn spawn_status_loop(
                         s.last_drift_ms = Some(drift);
                     }
                     let _ = out
-                        .send(ClientMsg::Drift(cuemesh2_shared::protocol::Drift {
+                        .send(ClientMsg::Drift(multiplex_shared::protocol::Drift {
                             drift_ms: drift,
                             filtered_offset_ms: offset,
                             sample_count: 0,
@@ -661,8 +661,8 @@ async fn handle_controller_msg(
         }
         ControllerMsg::Fade(cmd) => {
             let dur = Duration::from_millis(cmd.duration_ms as u64);
-            fades::fade(engine, cuemesh2_media::Layer::A, 0.0, dur);
-            fades::fade(engine, cuemesh2_media::Layer::B, 0.0, dur);
+            fades::fade(engine, multiplex_media::Layer::A, 0.0, dur);
+            fades::fade(engine, multiplex_media::Layer::B, 0.0, dur);
             let engine_clone = engine.clone();
             let state_clone = state.clone();
             tokio::spawn(async move {
@@ -683,17 +683,17 @@ async fn handle_controller_msg(
             s.playback.layer_b = Default::default();
             s.playback.current_cue_id = None;
         }
-        ControllerMsg::ShowTestscreen => match engine.load_testscreen(cuemesh2_media::Layer::A) {
+        ControllerMsg::ShowTestscreen => match engine.load_testscreen(multiplex_media::Layer::A) {
             Ok(_) => {
-                engine.set_alpha(cuemesh2_media::Layer::A, 1.0);
-                engine.set_alpha(cuemesh2_media::Layer::B, 0.0);
+                engine.set_alpha(multiplex_media::Layer::A, 1.0);
+                engine.set_alpha(multiplex_media::Layer::B, 0.0);
                 state.lock().unwrap().testscreen_on = true;
                 log(state, "testscreen on");
             }
             Err(e) => log(state, format!("testscreen failed: {e}")),
         },
         ControllerMsg::HideTestscreen => {
-            engine.stop(cuemesh2_media::Layer::A);
+            engine.stop(multiplex_media::Layer::A);
             state.lock().unwrap().testscreen_on = false;
             log(state, "testscreen off");
         }
@@ -760,7 +760,7 @@ async fn handle_controller_msg(
             finish_transfer(cfg, state, outbound, transfers, end.transfer_id).await;
         }
         ControllerMsg::UpdatePushBegin(begin) => {
-            let gst = cuemesh2_media::gstreamer_runtime_version();
+            let gst = multiplex_media::gstreamer_runtime_version();
             if let Err(e) = begin_update_transfer(transfers, &begin, gst).await {
                 log(state, format!("update push v{} rejected: {e:#}", begin.version));
                 let _ = outbound.try_send(ClientMsg::UpdatePushResult(UpdatePushResult {
@@ -863,7 +863,7 @@ fn sanitize_rel_path(rel: &Path) -> Result<()> {
 async fn begin_transfer(
     cfg: &Arc<ConnectionConfig>,
     transfers: &Transfers,
-    begin: &cuemesh2_shared::protocol::MediaPushBegin,
+    begin: &multiplex_shared::protocol::MediaPushBegin,
 ) -> Result<()> {
     sanitize_rel_path(&begin.rel_path)?;
     std::fs::create_dir_all(&cfg.media_root)?;
@@ -894,7 +894,7 @@ async fn begin_transfer(
 /// staged slot stays on one filesystem.
 async fn begin_update_transfer(
     transfers: &Transfers,
-    begin: &cuemesh2_shared::protocol::UpdatePushBegin,
+    begin: &multiplex_shared::protocol::UpdatePushBegin,
     gst_runtime: (u32, u32),
 ) -> Result<()> {
     update::precheck(begin, gst_runtime)?;
@@ -1132,8 +1132,8 @@ fn spawn_media_event_pump(engine: MediaEngine, state: SharedState, _cfg: Arc<Con
             match rx.recv().await {
                 Ok(MediaEvent::Eos(layer)) => {
                     let wire = match layer {
-                        cuemesh2_media::Layer::A => WireLayer::A,
-                        cuemesh2_media::Layer::B => WireLayer::B,
+                        multiplex_media::Layer::A => WireLayer::A,
+                        multiplex_media::Layer::B => WireLayer::B,
                     };
                     let on_end = state.lock().unwrap().layer_mut(wire).on_end;
                     log(&state, format!("engine: EOS on layer {layer:?} → {on_end:?}"));
@@ -1210,7 +1210,7 @@ mod tests {
 
     #[test]
     fn check_file_statuses() {
-        let dir = std::env::temp_dir().join("cuemesh2_check_file_test");
+        let dir = std::env::temp_dir().join("multiplex_check_file_test");
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("good.bin"), b"abc").unwrap();
 

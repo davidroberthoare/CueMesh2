@@ -1,7 +1,7 @@
 [show]
 title = "Example Show"
 version = 1
-media_root = "~/cuemesh_media"
+media_root = "~/multiplex_media"
 dropout_policy = "continue"
 
 [show.sync]

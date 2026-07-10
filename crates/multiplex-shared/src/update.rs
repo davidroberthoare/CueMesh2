@@ -11,13 +11,13 @@
 //! version = "0.2.0"
 //!
 //! [clients.x86_64-unknown-linux-gnu]
-//! file = "cuemesh2-client-x86_64-unknown-linux-gnu"
+//! file = "multiplex-client-x86_64-unknown-linux-gnu"
 //! sha256 = "…hex…"
 //! signature = "…base64…"
 //! min_gstreamer = "1.18"   # optional
 //!
 //! [controllers.x86_64-pc-windows-msvc]
-//! file = "cuemesh2-controller-x86_64-pc-windows-msvc.exe"
+//! file = "multiplex-controller-x86_64-pc-windows-msvc.exe"
 //! sha256 = "…hex…"
 //! signature = "…base64…"
 //! ```
@@ -33,19 +33,19 @@ use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, Verifying
 use serde::{Deserialize, Serialize};
 
 /// Default release public key, base64. Overridable at compile time via the
-/// `CUEMESH_RELEASE_PUBKEY_B64` env var (for organisations building their own
-/// signed distributions) and at runtime via `CUEMESH_UPDATE_PUBKEY` (intended
+/// `MULTIPLEX_RELEASE_PUBKEY_B64` env var (for organisations building their own
+/// signed distributions) and at runtime via `MULTIPLEX_UPDATE_PUBKEY` (intended
 /// for tests; a runtime attacker who can set env vars already owns the box).
 pub const DEFAULT_RELEASE_PUBKEY_B64: &str = "qfq6McGirCodvea+Hm3hixQj1AaHKyVFWSz0PA6hUxE=";
 
 /// Resolve the public key used to verify update artifacts.
 pub fn release_pubkey_b64() -> String {
-    if let Ok(k) = std::env::var("CUEMESH_UPDATE_PUBKEY") {
+    if let Ok(k) = std::env::var("MULTIPLEX_UPDATE_PUBKEY") {
         if !k.is_empty() {
             return k;
         }
     }
-    option_env!("CUEMESH_RELEASE_PUBKEY_B64")
+    option_env!("MULTIPLEX_RELEASE_PUBKEY_B64")
         .unwrap_or(DEFAULT_RELEASE_PUBKEY_B64)
         .to_string()
 }
@@ -226,7 +226,7 @@ mod tests {
         let good = r#"
             version = "0.2.0"
             [clients.x86_64-unknown-linux-gnu]
-            file = "cuemesh2-client-x86_64-unknown-linux-gnu"
+            file = "multiplex-client-x86_64-unknown-linux-gnu"
             sha256 = "ab"
             signature = "c2ln"
             min_gstreamer = "1.18"

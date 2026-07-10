@@ -1,4 +1,4 @@
-//! CueMesh2 controller binary.
+//! MultiPlex controller binary.
 //!
 //! Hosts the WebSocket server (default port 9420), runs a periodic sync loop,
 //! and drives the operator egui window.
@@ -7,8 +7,8 @@
 
 use std::net::SocketAddr;
 
-use cuemesh2_controller::{discovery, server, state, sync, ui, update};
-use cuemesh2_shared::protocol::DEFAULT_PORT;
+use multiplex_controller::{discovery, server, state, sync, ui, update};
+use multiplex_shared::protocol::DEFAULT_PORT;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let bind: SocketAddr = std::env::var("CUEMESH_BIND")
+    let bind: SocketAddr = std::env::var("MULTIPLEX_BIND")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)));
@@ -49,7 +49,7 @@ fn main() -> anyhow::Result<()> {
     // Keep the runtime alive for the lifetime of the UI.
     let _rt_guard = rt.enter();
     eframe::run_native(
-        "CueMesh2 Controller",
+        "MultiPlex Controller",
         native_options,
         Box::new(move |cc| {
             // egui's default fonts have no symbol glyphs; install Phosphor so

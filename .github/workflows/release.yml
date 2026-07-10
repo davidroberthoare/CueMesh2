@@ -125,21 +125,21 @@ jobs:
           cargo build --release --target aarch64-apple-darwin
           cargo build --release --target x86_64-apple-darwin
           mkdir -p target/release
-          lipo -create -output target/release/cuemesh2-controller \
-            target/aarch64-apple-darwin/release/cuemesh2-controller \
-            target/x86_64-apple-darwin/release/cuemesh2-controller
-          lipo -create -output target/release/cuemesh2-client \
-            target/aarch64-apple-darwin/release/cuemesh2-client \
-            target/x86_64-apple-darwin/release/cuemesh2-client
+          lipo -create -output target/release/multiplex-controller \
+            target/aarch64-apple-darwin/release/multiplex-controller \
+            target/x86_64-apple-darwin/release/multiplex-controller
+          lipo -create -output target/release/multiplex-client \
+            target/aarch64-apple-darwin/release/multiplex-client \
+            target/x86_64-apple-darwin/release/multiplex-client
 
       # ── Package ──
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
-          mkdir -p dist/cuemesh2
-          cp target/release/cuemesh2-controller target/release/cuemesh2-client dist/cuemesh2/
-          tar czf "dist/cuemesh2-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz" -C dist/cuemesh2 .
+          mkdir -p dist/multiplex
+          cp target/release/multiplex-controller target/release/multiplex-client dist/multiplex/
+          tar czf "dist/multiplex-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz" -C dist/multiplex .
 
       - name: Bundle + Package (Windows)
         if: runner.os == 'Windows'
@@ -156,39 +156,39 @@ jobs:
       #
       # Each job renames its binaries to flat per-triple asset names, signs
       # them with the release key (see CLAUDE.md "Auto-Update" and
-      # crates/cuemesh2-shared/examples/update_sign.rs), and emits the
+      # crates/multiplex-shared/examples/update_sign.rs), and emits the
       # manifest fragments. A follow-up job assembles manifest.toml and
       # uploads everything to the release.
 
       - name: Sign update artifacts
         shell: bash
         env:
-          CUEMESH_SIGNING_KEY: ${{ secrets.CUEMESH_SIGNING_KEY }}
+          MULTIPLEX_SIGNING_KEY: ${{ secrets.MULTIPLEX_SIGNING_KEY }}
         run: |
-          if [ -z "$CUEMESH_SIGNING_KEY" ]; then
-            echo "::error::CUEMESH_SIGNING_KEY secret is not set — cannot sign the update bundle. Run: gh secret set CUEMESH_SIGNING_KEY < ~/.cuemesh2/release_signing.key"
+          if [ -z "$MULTIPLEX_SIGNING_KEY" ]; then
+            echo "::error::MULTIPLEX_SIGNING_KEY secret is not set — cannot sign the update bundle. Run: gh secret set MULTIPLEX_SIGNING_KEY < ~/.multiplex/release_signing.key"
             exit 1
           fi
           mkdir -p update/bin update/fragments
           frag="update/fragments/${{ matrix.suffix }}.toml"
           sign() { # <clients|controllers> <triple> <src> <flat-name>
             cp "$3" "update/bin/$4"
-            cargo run -q -p cuemesh2-shared --example update_sign -- "$1" "$2" "update/bin/$4" >> "$frag"
+            cargo run -q -p multiplex-shared --example update_sign -- "$1" "$2" "update/bin/$4" >> "$frag"
             echo >> "$frag"
           }
           if [ "$RUNNER_OS" = "macOS" ]; then
             # One universal binary serves both Apple triples; the manifest
             # lists it under each so the controller finds it either way.
             for triple in aarch64-apple-darwin x86_64-apple-darwin; do
-              sign clients     "$triple" target/release/cuemesh2-client     cuemesh2-client-macos-universal
-              sign controllers "$triple" target/release/cuemesh2-controller cuemesh2-controller-macos-universal
+              sign clients     "$triple" target/release/multiplex-client     multiplex-client-macos-universal
+              sign controllers "$triple" target/release/multiplex-controller multiplex-controller-macos-universal
             done
             # sign() copies the same file repeatedly — harmless.
           else
             EXT=""
             [ "$RUNNER_OS" = "Windows" ] && EXT=".exe"
-            sign clients     "${{ matrix.target }}" "target/release/cuemesh2-client$EXT"     "cuemesh2-client-${{ matrix.target }}$EXT"
-            sign controllers "${{ matrix.target }}" "target/release/cuemesh2-controller$EXT" "cuemesh2-controller-${{ matrix.target }}$EXT"
+            sign clients     "${{ matrix.target }}" "target/release/multiplex-client$EXT"     "multiplex-client-${{ matrix.target }}$EXT"
+            sign controllers "${{ matrix.target }}" "target/release/multiplex-controller$EXT" "multiplex-controller-${{ matrix.target }}$EXT"
           fi
           cat "$frag"
 

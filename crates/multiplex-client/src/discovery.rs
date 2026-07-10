@@ -6,7 +6,7 @@ use std::net::IpAddr;
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 
-use cuemesh2_shared::protocol::MDNS_SERVICE_TYPE;
+use multiplex_shared::protocol::MDNS_SERVICE_TYPE;
 
 use crate::state::SharedState;
 
@@ -43,7 +43,7 @@ fn resolved_url(info: &ServiceInfo) -> Option<String> {
 /// `state.discovered` (instance name → ws URL). Never fatal.
 pub fn spawn_browser(state: SharedState) {
     std::thread::Builder::new()
-        .name("cuemesh2-mdns".into())
+        .name("multiplex-mdns".into())
         .spawn(move || {
             let daemon = match ServiceDaemon::new() {
                 Ok(d) => d,

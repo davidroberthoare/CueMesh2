@@ -1,7 +1,7 @@
 //! Client-side update staging and apply.
 //!
 //! An update arrives over the WebSocket as a signed binary (see
-//! `cuemesh2_shared::update`). It is **staged** next to the running
+//! `multiplex_shared::update`). It is **staged** next to the running
 //! executable (`<exe>.new` plus a `<exe>.new.meta` JSON sidecar) and only
 //! **applied** — atomic self-replace, then re-exec — on an explicit
 //! operator `APPLY_UPDATE`, or at the next clean startup. Verification
@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use cuemesh2_shared::protocol::UpdatePushBegin;
-use cuemesh2_shared::{hashing, update};
+use multiplex_shared::protocol::UpdatePushBegin;
+use multiplex_shared::{hashing, update};
 
 /// This binary's compile-time target triple (emitted by `build.rs`).
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");

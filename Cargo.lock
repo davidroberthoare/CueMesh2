@@ -489,90 +489,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cuemesh2-client"
-version = "0.1.5"
-dependencies = [
- "anyhow",
- "cuemesh2-media",
- "cuemesh2-shared",
- "dirs",
- "eframe",
- "egui",
- "futures-util",
- "mdns-sd",
- "self-replace",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "toml 0.8.23",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "cuemesh2-controller"
-version = "0.1.5"
-dependencies = [
- "anyhow",
- "cuemesh2-shared",
- "dirs",
- "eframe",
- "egui",
- "egui-file-dialog",
- "egui-phosphor",
- "futures-util",
- "mdns-sd",
- "reqwest",
- "self-replace",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-tungstenite",
- "toml 0.8.23",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "cuemesh2-media"
-version = "0.1.5"
-dependencies = [
- "anyhow",
- "cuemesh2-shared",
- "gstreamer",
- "gstreamer-app",
- "gstreamer-video",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "cuemesh2-shared"
-version = "0.1.5"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "chrono",
- "ed25519-dalek",
- "getrandom 0.2.17",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 1.0.69",
- "toml 0.8.23",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1978,6 +1894,90 @@ name = "muldiv"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "956787520e75e9bd233246045d19f42fb73242759cc57fba9611d940ae96d4b0"
+
+[[package]]
+name = "multiplex-client"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "eframe",
+ "egui",
+ "futures-util",
+ "mdns-sd",
+ "multiplex-media",
+ "multiplex-shared",
+ "self-replace",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "multiplex-controller"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "eframe",
+ "egui",
+ "egui-file-dialog",
+ "egui-phosphor",
+ "futures-util",
+ "mdns-sd",
+ "multiplex-shared",
+ "reqwest",
+ "self-replace",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "multiplex-media"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "gstreamer",
+ "gstreamer-app",
+ "gstreamer-video",
+ "multiplex-shared",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "multiplex-shared"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "toml 0.8.23",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "ndk"

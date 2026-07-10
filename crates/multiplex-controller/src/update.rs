@@ -21,9 +21,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
-use cuemesh2_shared::protocol::{ControllerMsg, UpdatePushBegin, UpdatePushEnd};
-use cuemesh2_shared::update::{self, Artifact, UpdateManifest};
-use cuemesh2_shared::{hashing, transfer};
+use multiplex_shared::protocol::{ControllerMsg, UpdatePushBegin, UpdatePushEnd};
+use multiplex_shared::update::{self, Artifact, UpdateManifest};
+use multiplex_shared::{hashing, transfer};
 
 use crate::preflight::next_transfer_id;
 use crate::server::{client_queue, log};
@@ -37,17 +37,17 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Where release downloads come from. GitHub's `releases/latest/download/`
 /// redirect serves flat asset names, which is why manifest `file` fields are
-/// flat. Override with `CUEMESH_UPDATE_URL` (e.g. an intranet mirror).
+/// flat. Override with `MULTIPLEX_UPDATE_URL` (e.g. an intranet mirror).
 fn release_base_url() -> String {
-    std::env::var("CUEMESH_UPDATE_URL").unwrap_or_else(|_| {
-        "https://github.com/davidroberthoare/CueMesh2/releases/latest/download".into()
+    std::env::var("MULTIPLEX_UPDATE_URL").unwrap_or_else(|_| {
+        "https://github.com/davidroberthoare/multiplex/releases/latest/download".into()
     })
 }
 
 /// The local update bundle: `updates/` next to the controller binary, or
-/// `CUEMESH_UPDATE_BUNDLE`.
+/// `MULTIPLEX_UPDATE_BUNDLE`.
 pub fn bundle_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("CUEMESH_UPDATE_BUNDLE") {
+    if let Ok(dir) = std::env::var("MULTIPLEX_UPDATE_BUNDLE") {
         return PathBuf::from(dir);
     }
     std::env::current_exe()
@@ -316,7 +316,7 @@ async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
 async fn self_update_inner(state: &SharedState) -> Result<Option<String>> {
     let base = release_base_url();
     let http = reqwest::Client::builder()
-        .user_agent(concat!("cuemesh2-controller/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("multiplex-controller/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
     let manifest_bytes = fetch(&http, &format!("{base}/manifest.toml")).await?;
@@ -439,7 +439,7 @@ fn restart_self(state: &SharedState, exe: &Path) {
 mod tests {
     use super::*;
     use crate::state::ClientRow;
-    use cuemesh2_shared::protocol::ClientState;
+    use multiplex_shared::protocol::ClientState;
     use tokio::sync::mpsc;
 
     fn row(version: &str, triple: &str) -> ClientRow {
@@ -468,7 +468,7 @@ mod tests {
             r#"
             version = "0.2.0"
             [clients.x86_64-unknown-linux-gnu]
-            file = "cuemesh2-client-x86_64-unknown-linux-gnu"
+            file = "multiplex-client-x86_64-unknown-linux-gnu"
             sha256 = "ab"
             signature = "c2ln"
             "#,

@@ -1,18 +1,18 @@
 [package]
-name = "cuemesh2-controller"
+name = "multiplex-controller"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CueMesh2 controller: cue editor, run mode, and hub for connected clients."
+description = "MultiPlex controller: cue editor, run mode, and hub for connected clients."
 
 [[bin]]
-name = "cuemesh2-controller"
+name = "multiplex-controller"
 path = "src/main.rs"
 
 [dependencies]
-cuemesh2-shared = { workspace = true }
+multiplex-shared = { workspace = true }
 
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }

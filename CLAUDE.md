@@ -1,8 +1,8 @@
-# CueMesh2 — Agent Guidance
+# MultiPlex — Agent Guidance
 
 ## What Is This Project?
 
-CueMesh2 is an **open-source, portable, offline, LAN-only synchronized video playback system** for small theatres. A technician runs cues from a **Controller** machine, and one or more **Client** nodes play media in sync (~50–150ms). The killer feature over hobby-grade solutions: **crossfades between videos** and clean fades to/from black, plus **cross-platform binaries** that run on almost any machine a small theatre might have lying around.
+MultiPlex is an **open-source, portable, offline, LAN-only synchronized video playback system** for small theatres. A technician runs cues from a **Controller** machine, and one or more **Client** nodes play media in sync (~50–150ms). The killer feature over hobby-grade solutions: **crossfades between videos** and clean fades to/from black, plus **cross-platform binaries** that run on almost any machine a small theatre might have lying around.
 
 This is a **fresh project** — not a port of anything. It is inspired by an earlier Python prototype (see `../CueMesh/`) for the general concept, but the design decisions below take precedence over anything in that older code.
 
@@ -76,13 +76,13 @@ The controller and a client can run in the same process (single-box mode) or on 
 ### Workspace Layout
 
 ```
-CueMesh2/
+MultiPlex/
 ├── Cargo.toml              # workspace root
 ├── crates/
-│   ├── cuemesh2-shared/    # protocol, show file, clock sync, hashing, logging
-│   ├── cuemesh2-controller/# server, discovery, preflight, UI
-│   ├── cuemesh2-client/    # connection, media engine, discovery, UI
-│   └── cuemesh2-media/     # GStreamer pipeline wrapper (used by client)
+│   ├── multiplex-shared/    # protocol, show file, clock sync, hashing, logging
+│   ├── multiplex-controller/# server, discovery, preflight, UI
+│   ├── multiplex-client/    # connection, media engine, discovery, UI
+│   └── multiplex-media/     # GStreamer pipeline wrapper (used by client)
 ├── examples/
 │   └── example_show.cuemesh.toml
 ├── docs/
@@ -93,7 +93,7 @@ Splitting the media engine into its own crate lets us test the pipeline in isola
 
 ---
 
-## Media Engine (`cuemesh2-media`)
+## Media Engine (`multiplex-media`)
 
 The media engine is the heart of this project. Everything else exists to serve it.
 
@@ -165,7 +165,7 @@ On armv7 the media engine **tries `v4l2h264dec` first** for H.264 sources and **
 
 ---
 
-## Network Protocol (`cuemesh2-shared::protocol`)
+## Network Protocol (`multiplex-shared::protocol`)
 
 JSON envelopes over WebSocket on **port 9420**:
 
@@ -205,11 +205,11 @@ The deployment is a single theatre's LAN, so **any client that connects is autom
 
 Client state machine: `idle → loading → ready → playing → paused → error → black`.
 
-Since this is a clean-slate protocol, we're free to iterate on the exact payload shapes as implementation proceeds — pin them down in `cuemesh2-shared::protocol` with `serde`-derived structs and version the envelope from day one.
+Since this is a clean-slate protocol, we're free to iterate on the exact payload shapes as implementation proceeds — pin them down in `multiplex-shared::protocol` with `serde`-derived structs and version the envelope from day one.
 
 ---
 
-## Clock Sync (`cuemesh2-shared::clock_sync`)
+## Clock Sync (`multiplex-shared::clock_sync`)
 
 Standard NTP-style four-way handshake, driven from the controller every 1000ms while a client is accepted:
 
@@ -312,10 +312,10 @@ Controller-mediated, **operator-triggered** (never automatic), offline-capable.
 Two independent actions in the controller toolbar:
 
 1. **Update controller** — when online, fetches the latest signed release
-   (`CUEMESH_UPDATE_URL`, default the GitHub `releases/latest/download`
+   (`MULTIPLEX_UPDATE_URL`, default the GitHub `releases/latest/download`
    redirect), verifies everything, stages its own binary (`<exe>.new`), and
    caches the full per-platform **client bundle** into `updates/` next to the
-   binary (`CUEMESH_UPDATE_BUNDLE` overrides). The operator confirms the
+   binary (`MULTIPLEX_UPDATE_BUNDLE` overrides). The operator confirms the
    restart. Offline theatres skip this and drop a bundle in by hand (USB).
 2. **Update fleet** — streams the right per-triple client binary from the
    local bundle over the existing WebSocket (same chunk framing as media
@@ -332,12 +332,12 @@ Two independent actions in the controller toolbar:
 `manifest.toml` with `version = "X.Y.Z"` plus `[clients.<triple>]` /
 `[controllers.<triple>]` tables (`file`, `sha256`, `signature`, optional
 `min_gstreamer`) — see `cuemesh2_shared::update`. Sign each artifact with
-`cargo run -p cuemesh2-shared --example update_sign` (key in the
-`CUEMESH_SIGNING_KEY` env var / CI secret; generate with the `update_keygen`
+`cargo run -p multiplex-shared --example update_sign` (key in the
+`MULTIPLEX_SIGNING_KEY` env var / CI secret; generate with the `update_keygen`
 example — the private key is **never** committed and never lives on a
 controller). The verifying public key is baked in
 (`update::DEFAULT_RELEASE_PUBKEY_B64`, overridable at build time via
-`CUEMESH_RELEASE_PUBKEY_B64`); clients report `app_version` + `target_triple`
+`MULTIPLEX_RELEASE_PUBKEY_B64`); clients report `app_version` + `target_triple`
 in `HELLO`, which drives "update available" in the roster.
 
 Limitations: only the CueMesh binary is swapped — a release needing a newer
@@ -346,7 +346,7 @@ no delta updates; controller self-update needs internet at that moment.
 
 ## Discovery, Preflight, Diagnostics
 
-- **Discovery** — controller advertises `_cuemesh._tcp.local.` via `mdns-sd`; client browses and offers a manual IP fallback.
+- **Discovery** — controller advertises `_multiplex._tcp.local.` via `mdns-sd`; client browses and offers a manual IP fallback.
 - **Preflight** — before running a show, controller collects SHA-256 hashes from each client and reports `ok`/`missing`/`mismatch` per file.
 - **Support bundle** — a ZIP of system info, active show, and rotating logs for troubleshooting. Rolled by `tracing-appender`, aggregated on request.
 
@@ -358,7 +358,7 @@ Minimal, functional, `egui`.
 
 **Controller** — show manager (open/save/save-as via a pure-egui file dialog), a cue **table editor** (name/type/source/fade-in with per-row actions; ids are auto-generated and hidden), cue list with GO/NEXT/PREV/BLACKOUT, client roster with status, diagnostics/log view. Toolbar/table icons use the `egui-phosphor` icon font (egui's default fonts lack symbol glyphs).
 
-**Client** — a chromeless, resizable box showing *just* the video canvas. Text appears only (1) on startup / when disconnected: a small grey status line at the bottom; and (2) on testscreen: the client's name + id centred over the pattern. Controller selection is automatic (first mDNS-discovered controller adopted while offline; manual override via `CUEMESH_CONTROLLER`).
+**Client** — a chromeless, resizable box showing *just* the video canvas. Text appears only (1) on startup / when disconnected: a small grey status line at the bottom; and (2) on testscreen: the client's name + id centred over the pattern. Controller selection is automatic (first mDNS-discovered controller adopted while offline; manual override via `MULTIPLEX_CONTROLLER`).
 
 The GUI runs on the main thread. Everything I/O-heavy is on `tokio` tasks communicating with the GUI via channels.
 
@@ -369,7 +369,7 @@ The GUI runs on the main thread. Everything I/O-heavy is on `tokio` tasks commun
 - `clippy` on default lints; no `#[allow(...)]` without an inline comment explaining why.
 - No `unwrap()` or `expect()` in library code — use `?` and typed errors.
 - `thiserror` for library errors, `anyhow` at binary entry points.
-- Doc comments on all public items in `cuemesh2-shared` and `cuemesh2-media`.
+- Doc comments on all public items in `multiplex-shared` and `multiplex-media`.
 - Tests: unit tests in `#[cfg(test)]` modules alongside code; integration tests in each crate's `tests/`.
 - Format with `rustfmt` (default settings).
 - Every commit should build and pass tests on Linux x86_64 at minimum.

@@ -1,11 +1,11 @@
 [package]
-name = "cuemesh2-shared"
+name = "multiplex-shared"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared protocol, show file, clock sync, and utility types for CueMesh2."
+description = "Shared protocol, show file, clock sync, and utility types for MultiPlex."
 
 [dependencies]
 serde = { workspace = true }

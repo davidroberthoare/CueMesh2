@@ -3,7 +3,7 @@
 //! a small grey status line at the bottom; (2) testscreen — a large centred
 //! block naming this client. Controller selection is automatic: the first
 //! mDNS-discovered controller is adopted while offline (manual override via
-//! `CUEMESH_CONTROLLER`).
+//! `MULTIPLEX_CONTROLLER`).
 //!
 //! There is no window chrome to trigger native OS fullscreen from (no menu
 //! bar, no title bar), so `F` or `F11` toggles it directly — safe to claim
@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use cuemesh2_media::MediaEngine;
+use multiplex_media::MediaEngine;
 
 use crate::state::SharedState;
 
@@ -62,7 +62,7 @@ impl eframe::App for ClientApp {
                     Some(tex) => tex.set(color_image, opts),
                     None => {
                         self.video_texture =
-                            Some(ctx.load_texture("cuemesh2-video", color_image, opts));
+                            Some(ctx.load_texture("multiplex-video", color_image, opts));
                     }
                 }
             }
@@ -142,7 +142,7 @@ impl eframe::App for ClientApp {
 
                 // 2. Startup / disconnected: small grey status line, bottom.
                 if !connected {
-                    let msg = format!("CueMesh2 · {name} · connecting to {addr} …");
+                    let msg = format!("MultiPlex · {name} · connecting to {addr} …");
                     painter.text(
                         egui::pos2(rect.left() + 10.0, rect.bottom() - 8.0),
                         egui::Align2::LEFT_BOTTOM,

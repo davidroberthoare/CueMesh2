@@ -1,4 +1,4 @@
-//! Shared types and utilities for CueMesh2 (protocol, show file, clock sync, hashing).
+//! Shared types and utilities for MultiPlex (protocol, show file, clock sync, hashing).
 //!
 //! See `CLAUDE.md` at the workspace root for the design brief.
 

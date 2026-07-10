@@ -1,11 +1,11 @@
 //! Manual smoke test for the killer feature: play file A, preload file B
 //! while A is playing (must not disturb A), then crossfade A → B.
 //!
-//! Usage: cargo run -p cuemesh2-media --example crossfade -- <fileA> <fileB> [fade_ms]
+//! Usage: cargo run -p multiplex-media --example crossfade -- <fileA> <fileB> [fade_ms]
 
 use std::time::Duration;
 
-use cuemesh2_media::{fades, Layer, MediaEngine, MediaKind};
+use multiplex_media::{fades, Layer, MediaEngine, MediaKind};
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()

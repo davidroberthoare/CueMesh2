@@ -15,14 +15,14 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
-use cuemesh2_client::state::PlaybackState;
-use cuemesh2_client::update::{discard_staged, staged_bin_path, staged_version};
-use cuemesh2_client::{connection, state};
-use cuemesh2_media::MediaEngine;
-use cuemesh2_shared::protocol::{
+use multiplex_client::state::PlaybackState;
+use multiplex_client::update::{discard_staged, staged_bin_path, staged_version};
+use multiplex_client::{connection, state};
+use multiplex_media::MediaEngine;
+use multiplex_shared::protocol::{
     ClientMsg, ControllerMsg, Envelope, UpdatePushBegin, UpdatePushEnd,
 };
-use cuemesh2_shared::{hashing, transfer, update as shared_update};
+use multiplex_shared::{hashing, transfer, update as shared_update};
 
 /// Fixed test seed — NOT the release key.
 const TEST_PRIV: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
@@ -38,7 +38,7 @@ fn now_ms() -> u64 {
 #[tokio::test(flavor = "multi_thread")]
 async fn client_stages_pushed_update_and_refuses_apply_while_playing() {
     std::env::set_var(
-        "CUEMESH_UPDATE_PUBKEY",
+        "MULTIPLEX_UPDATE_PUBKEY",
         shared_update::pubkey_of(TEST_PRIV).unwrap(),
     );
     discard_staged();
@@ -50,7 +50,7 @@ async fn client_stages_pushed_update_and_refuses_apply_while_playing() {
     // ── Real client connection task ───────────────────────────────────────
     let engine = MediaEngine::new().expect("GStreamer runtime required for this test");
     let client_state = state::shared();
-    let media_root = std::env::temp_dir().join("cuemesh2_update_over_wire_media");
+    let media_root = std::env::temp_dir().join("multiplex_update_over_wire_media");
     let _ = std::fs::create_dir_all(&media_root);
     {
         let run_state = client_state.clone();

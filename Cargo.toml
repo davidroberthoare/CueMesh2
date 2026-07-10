@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/cuemesh2-shared",
-    "crates/cuemesh2-media",
-    "crates/cuemesh2-controller",
-    "crates/cuemesh2-client",
+    "crates/multiplex-shared",
+    "crates/multiplex-media",
+    "crates/multiplex-controller",
+    "crates/multiplex-client",
     "crates/playback-spike",
 ]
 
@@ -13,12 +13,12 @@ version = "0.1.5"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
-repository = "https://github.com/davidroberthoare/CueMesh2"
+repository = "https://github.com/davidroberthoare/multiplex"
 
 [workspace.dependencies]
 # Local crates
-cuemesh2-shared = { path = "crates/cuemesh2-shared" }
-cuemesh2-media  = { path = "crates/cuemesh2-media" }
+multiplex-shared = { path = "crates/multiplex-shared" }
+multiplex-media  = { path = "crates/multiplex-media" }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "fs", "io-util", "signal"] }

@@ -1,4 +1,4 @@
-//! Wire protocol for CueMesh2.
+//! Wire protocol for MultiPlex.
 //!
 //! All messages are JSON envelopes over WebSocket. Envelope shape:
 //!
@@ -127,7 +127,7 @@ pub struct ShowSync {
 ///
 /// `file` is **relative to the media root**; each side resolves it against
 /// its own root (controller: the show's `media_root`; client: its configured
-/// `CUEMESH_MEDIA_ROOT`). Absolute paths would only work single-box.
+/// `MULTIPLEX_MEDIA_ROOT`). Absolute paths would only work single-box.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadCue {
     pub cue_id: String,
@@ -417,7 +417,7 @@ pub const PROTOCOL_VERSION: u32 = 3;
 pub const DEFAULT_PORT: u16 = 9420;
 
 /// mDNS service type advertised by the controller.
-pub const MDNS_SERVICE_TYPE: &str = "_cuemesh._tcp.local.";
+pub const MDNS_SERVICE_TYPE: &str = "_multiplex._tcp.local.";
 
 #[cfg(test)]
 mod tests {

@@ -1,15 +1,15 @@
 //! mDNS advertisement: lets clients on the LAN find this controller without
-//! typing an IP. Advertises `_cuemesh._tcp.local.` with our WebSocket port.
+//! typing an IP. Advertises `_multiplex._tcp.local.` with our WebSocket port.
 
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 
-use cuemesh2_shared::protocol::MDNS_SERVICE_TYPE;
+use multiplex_shared::protocol::MDNS_SERVICE_TYPE;
 
 /// Register the service and keep the daemon alive for the process lifetime.
 /// Failure is logged, never fatal — manual IP entry always works.
 pub fn advertise(port: u16) {
     let hostname = hostname();
-    let instance = format!("CueMesh2 Controller ({hostname})");
+    let instance = format!("MultiPlex Controller ({hostname})");
     match try_advertise(&instance, &hostname, port) {
         Ok(daemon) => {
             tracing::info!(%instance, port, "mDNS advertisement registered");
@@ -54,5 +54,5 @@ fn hostname() -> String {
                 .map(|s| s.trim().to_string())
                 .filter(|h| !h.is_empty())
         })
-        .unwrap_or_else(|| "cuemesh2".into())
+        .unwrap_or_else(|| "multiplex".into())
 }

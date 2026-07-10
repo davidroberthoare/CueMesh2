@@ -6,12 +6,12 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
-use cuemesh2_controller::{server, state};
-use cuemesh2_shared::protocol::{
+use multiplex_controller::{server, state};
+use multiplex_shared::protocol::{
     ClientMsg, ClientState, ControllerMsg, Envelope, Hello, MediaFileStatus, MediaReport,
     MediaReportEntry, Status, SyncReply, PROTOCOL_VERSION,
 };
-use cuemesh2_shared::show::ShowFile;
+use multiplex_shared::show::ShowFile;
 
 const TEST_SHOW: &str = r#"
 [show]
