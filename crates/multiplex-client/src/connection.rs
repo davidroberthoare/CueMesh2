@@ -869,7 +869,7 @@ async fn begin_transfer(
     std::fs::create_dir_all(&cfg.media_root)?;
     let tmp_path = cfg
         .media_root
-        .join(format!(".cuemesh-incoming-{}", begin.transfer_id));
+        .join(format!(".multiplex-incoming-{}", begin.transfer_id));
     let file = std::fs::File::create(&tmp_path)?;
     transfers.lock().await.insert(
         begin.transfer_id,
@@ -899,7 +899,7 @@ async fn begin_update_transfer(
 ) -> Result<()> {
     update::precheck(begin, gst_runtime)?;
     let staged = update::staged_bin_path()?;
-    let tmp_path = staged.with_file_name(format!(".cuemesh-update-{}", begin.transfer_id));
+    let tmp_path = staged.with_file_name(format!(".multiplex-update-{}", begin.transfer_id));
     let file = std::fs::File::create(&tmp_path)?;
     transfers.lock().await.insert(
         begin.transfer_id,

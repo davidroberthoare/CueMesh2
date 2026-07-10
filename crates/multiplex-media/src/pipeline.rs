@@ -152,13 +152,13 @@ fn ensure_init() -> Result<(), MediaError> {
 
 fn channel_name(layer: Layer) -> &'static str {
     match layer {
-        Layer::A => "cuemesh-layer-a",
-        Layer::B => "cuemesh-layer-b",
+        Layer::A => "multiplex-layer-a",
+        Layer::B => "multiplex-layer-b",
     }
 }
 
 /// Inter-channel for the background poster layer (below both cue layers).
-const BG_CHANNEL: &str = "cuemesh-layer-bg";
+const BG_CHANNEL: &str = "multiplex-layer-bg";
 
 /// A running producer pipeline plus the flag that stops its bus-watch thread.
 struct Producer {

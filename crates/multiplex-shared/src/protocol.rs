@@ -236,7 +236,7 @@ pub struct UpdatePushBegin {
     pub signature_b64: String,
     /// Minimum GStreamer runtime ("major.minor") the pushed binary needs;
     /// the client refuses when its installed runtime is older, since the
-    /// updater swaps only the CueMesh binary, never the bundled runtime.
+    /// updater swaps only the MultiPlex binary, never the bundled runtime.
     #[serde(default)]
     pub min_gstreamer: Option<String>,
 }

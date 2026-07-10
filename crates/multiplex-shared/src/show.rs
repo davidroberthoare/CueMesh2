@@ -1,4 +1,4 @@
-//! Show file format (`*.cuemesh.toml`).
+//! Show file format (`*.multiplex.toml`).
 //!
 //! Load a show from disk with [`ShowFile::load`]. Validation checks unique cue
 //! IDs, media file existence relative to `media_root`, and value ranges.
@@ -207,7 +207,7 @@ impl ShowFile {
             show: Show {
                 title: title.into(),
                 version: 1,
-                media_root: PathBuf::from("~/cuemesh_media"),
+                media_root: PathBuf::from("~/multiplex_media"),
                 dropout_policy: DropoutPolicy::default(),
                 sync: SyncConfig::default(),
                 poster: None,
@@ -365,7 +365,7 @@ crossfade_to_next_ms = 500
             on_end: EndAction::default(),
             notes: None,
         });
-        let tmp = std::env::temp_dir().join("multiplex_show_roundtrip.cuemesh.toml");
+        let tmp = std::env::temp_dir().join("multiplex_show_roundtrip.multiplex.toml");
         sf.save(&tmp).unwrap();
         let back = ShowFile::load(&tmp).unwrap();
         assert_eq!(back.show.title, "Roundtrip");

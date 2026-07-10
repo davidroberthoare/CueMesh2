@@ -16,7 +16,7 @@ This is a **fresh project** — not a port of anything. It is inspired by an ear
 - **Local mode** — controller and client must both run happily on a single machine (both for testing and for solo operators).
 - **Sync target** — medium sync: ~50–150ms on a typical LAN.
 - **Resilient clients** — a client that loses network must keep playing its current cue smoothly, without crashing, until reconnect.
-- **File format** — hand-editable TOML (`.cuemesh.toml`).
+- **File format** — hand-editable TOML (`.multiplex.toml`).
 - **Single fullscreen display per client**.
 - **Minimal UI** — small, functional, no design flourishes. The video engine is what matters.
 - **MIT licensed**.
@@ -84,7 +84,7 @@ MultiPlex/
 │   ├── multiplex-client/    # connection, media engine, discovery, UI
 │   └── multiplex-media/     # GStreamer pipeline wrapper (used by client)
 ├── examples/
-│   └── example_show.cuemesh.toml
+│   └── example_show.multiplex.toml
 ├── docs/
 └── CLAUDE.md
 ```
@@ -240,13 +240,13 @@ Practically: the WebSocket task and the media engine task are independent. The m
 
 ## Show File Format
 
-TOML, extension `.cuemesh.toml`. Rough shape (final field names get pinned when we write the `Show` struct):
+TOML, extension `.multiplex.toml`. Rough shape (final field names get pinned when we write the `Show` struct):
 
 ```toml
 [show]
 title = "..."
 version = 1
-media_root = "~/cuemesh_media"
+media_root = "~/multiplex_media"
 dropout_policy = "continue"  # continue | freeze | black
 
 [show.sync]

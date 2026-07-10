@@ -18,7 +18,7 @@ Everything is LAN-only and offline. No internet, no accounts, no cloud.
 ## 1. Stage the media
 
 Each client plays files from its own **media root** (default
-`~/cuemesh_media`, override with the `MULTIPLEX_MEDIA_ROOT` environment
+`~/multiplex_media`, override with the `MULTIPLEX_MEDIA_ROOT` environment
 variable). Cues in the show file reference files **relative to that root**, so
 the same show works on every machine regardless of where its media lives.
 
@@ -44,7 +44,7 @@ multiplex-controller
 Optionally point it at a show on startup:
 
 ```sh
-MULTIPLEX_SHOW=~/shows/mynight.cuemesh.toml multiplex-controller
+MULTIPLEX_SHOW=~/shows/mynight.multiplex.toml multiplex-controller
 ```
 
 On each client machine:
@@ -74,7 +74,7 @@ immediately; there is no approval step.
 - **Create or edit one in-app:** *New show* or *Edit show*. The editor lets
   you set the show settings and add/reorder/duplicate/delete cues, choosing
   each cue's media file from the files found under the media root. *Save to
-  file* writes the `.cuemesh.toml`; *Apply to running show* pushes it live to
+  file* writes the `.multiplex.toml`; *Apply to running show* pushes it live to
   every connected client without saving.
 
 A cue's fade and crossfade timings live on the cue itself:

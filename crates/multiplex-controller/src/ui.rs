@@ -17,14 +17,14 @@ use crate::server::{broadcast, load_cue_for, now_utc_ms};
 use crate::state::{ClientUpdate, SelfUpdate, SharedState};
 use crate::update;
 
-/// A file dialog pre-filtered to CueMesh show files.
+/// A file dialog pre-filtered to MultiPlex show files.
 fn show_dialog() -> FileDialog {
     let filter: Arc<dyn Fn(&Path) -> bool + Send + Sync> =
-        Arc::new(|p| p.to_string_lossy().to_ascii_lowercase().ends_with(".cuemesh.toml"));
+        Arc::new(|p| p.to_string_lossy().to_ascii_lowercase().ends_with(".multiplex.toml"));
     FileDialog::new()
-        .add_file_filter("CueMesh shows (*.cuemesh.toml)", filter)
-        .default_file_filter("CueMesh shows (*.cuemesh.toml)")
-        .default_file_name("show.cuemesh.toml")
+        .add_file_filter("MultiPlex shows (*.multiplex.toml)", filter)
+        .default_file_filter("MultiPlex shows (*.multiplex.toml)")
+        .default_file_name("show.multiplex.toml")
 }
 
 /// How long a cue selection must hold still before we preload it. Keeps

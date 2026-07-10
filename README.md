@@ -96,7 +96,7 @@ color = "#000000"
 fade_in_ms = 1500
 ```
 
-See `examples/example_show.cuemesh.toml` for a real example.
+See `examples/example_show.multiplex.toml` for a real example.
 
 ---
 

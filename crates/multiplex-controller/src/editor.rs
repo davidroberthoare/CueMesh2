@@ -1,4 +1,4 @@
-//! Show editor: create and edit `*.cuemesh.toml` shows in-app.
+//! Show editor: create and edit `*.multiplex.toml` shows in-app.
 //!
 //! The editor works on a *draft* made of `String`/primitive fields so egui
 //! widgets can bind to them directly, converting to/from [`ShowFile`] on enter
@@ -630,7 +630,7 @@ mod tests {
         });
 
         let mut ed = EditorState::default();
-        ed.enter(Some(&sf), Some(Path::new("/tmp/show.cuemesh.toml")));
+        ed.enter(Some(&sf), Some(Path::new("/tmp/show.multiplex.toml")));
         let built = ed.build();
 
         assert_eq!(built.show.title, "Editor Test");
@@ -648,7 +648,7 @@ mod tests {
         assert_eq!(built.cues[1].kind, CueKind::Color);
         assert_eq!(built.cues[1].color.as_deref(), Some("#101820"));
         assert!(built.cues[1].file.as_os_str().is_empty());
-        assert_eq!(ed.save_path(), Some(PathBuf::from("/tmp/show.cuemesh.toml")));
+        assert_eq!(ed.save_path(), Some(PathBuf::from("/tmp/show.multiplex.toml")));
         built.validate().unwrap();
     }
 

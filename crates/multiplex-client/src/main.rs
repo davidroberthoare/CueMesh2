@@ -8,7 +8,7 @@
 //!   `MULTIPLEX_CONTROLLER` — controller URL (default `ws://127.0.0.1:9420`)
 //!   `MULTIPLEX_NAME`       — human-readable client name (default hostname)
 //!   `MULTIPLEX_MEDIA_ROOT` — where this client's media lives
-//!                          (default `~/cuemesh_media`)
+//!                          (default `~/multiplex_media`)
 //!   `MULTIPLEX_CANVAS`     — output canvas as `WxH@FPS`, e.g. `1280x720@30`
 //!                          (default 1920x1080@30)
 //!   `MULTIPLEX_DRIFT`      — set to `off` to report but never correct drift
@@ -51,14 +51,14 @@ fn main() -> anyhow::Result<()> {
     let name = std::env::var("MULTIPLEX_NAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .or_else(|_| std::env::var("COMPUTERNAME"))
-        .unwrap_or_else(|_| "cuemesh-client".into());
+        .unwrap_or_else(|_| "multiplex-client".into());
     let client_id = uuid::Uuid::new_v4().to_string();
     let media_root = std::env::var("MULTIPLEX_MEDIA_ROOT")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             dirs::home_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("cuemesh_media")
+                .join("multiplex_media")
         });
 
     let engine = match std::env::var("MULTIPLEX_CANVAS").ok().as_deref().map(parse_canvas) {
