@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 /// `MULTIPLEX_RELEASE_PUBKEY_B64` env var (for organisations building their own
 /// signed distributions) and at runtime via `MULTIPLEX_UPDATE_PUBKEY` (intended
 /// for tests; a runtime attacker who can set env vars already owns the box).
-pub const DEFAULT_RELEASE_PUBKEY_B64: &str = "qfq6McGirCodvea+Hm3hixQj1AaHKyVFWSz0PA6hUxE=";
+pub const DEFAULT_RELEASE_PUBKEY_B64: &str = "Sljj5FlA1h8VZHmORCHza3YJWSO5HE59EePwxGsstYQ=";
 
 /// Resolve the public key used to verify update artifacts.
 pub fn release_pubkey_b64() -> String {
