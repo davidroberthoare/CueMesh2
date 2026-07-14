@@ -60,23 +60,31 @@ pub struct ClientRow {
     pub push_progress: Option<(PathBuf, u64, u64)>,
     /// Outbound queue to the WebSocket task for this client.
     pub outbound: mpsc::Sender<Outgoing>,
+    /// Layer this client's most recent GO went out on; the next GO for this
+    /// client uses the other layer. `None` = nothing on air on this client
+    /// yet. Per-client (not global) because a cue can exclude some clients,
+    /// so different clients can be mid-crossfade on different layers at once.
+    pub active_layer: Option<Layer>,
+    /// (cue_id, layer) currently pre-loaded on this client via STANDBY, so GO
+    /// can skip the LOAD_CUE and fire PLAY_AT alone. Cleared when consumed by
+    /// GO or invalidated by a show change.
+    pub standby: Option<(String, Layer)>,
+    /// This client's next-STANDBY target layer is busy finishing a
+    /// crossfade-out until this controller-UTC ms; preloading onto it before
+    /// then would cut the outgoing video. 0 = free now.
+    pub idle_free_utc_ms: u64,
+    /// Cue id currently on-air for this client specifically (`None` if idle
+    /// or excluded from the cue that's on air fleet-wide).
+    pub now_playing: Option<String>,
 }
 
 /// Where we are in the running show.
 #[derive(Debug, Clone, Default)]
 pub struct RunState {
-    /// Cue index currently on air, if any.
+    /// Cue index currently on air, if any. Drives the operator's cue-list
+    /// highlight only — per-client layer/standby state lives on `ClientRow`
+    /// (see its doc comments), since a cue can exclude some clients.
     pub playing_cue_idx: Option<usize>,
-    /// Layer that cue went out on; the next GO uses the other layer.
-    pub active_layer: Option<Layer>,
-    /// (cue_id, layer) currently pre-loaded on clients via STANDBY, so GO can
-    /// skip the LOAD_CUE and fire PLAY_AT alone. Cleared when consumed by GO
-    /// or invalidated by a show change.
-    pub standby: Option<(String, Layer)>,
-    /// The next STANDBY target layer is busy finishing a crossfade-out until
-    /// this controller-UTC ms; preloading onto it before then would cut the
-    /// outgoing video. 0 = free now.
-    pub idle_free_utc_ms: u64,
 }
 
 #[derive(Debug, Default)]
@@ -97,6 +105,13 @@ pub struct AppState {
     pub update_manifest: Option<UpdateManifest>,
     /// Where the controller's own self-update stands (drives the toolbar).
     pub self_update: SelfUpdate,
+    /// Every client the controller has ever seen or named, keyed by its
+    /// persistent client id — including ones not currently connected. Feeds
+    /// the cue editor's client picker; `AppState.clients` alone only knows
+    /// about clients connected right now. Persisted to `known_clients_path`.
+    pub known_clients: HashMap<String, crate::known_clients::KnownClient>,
+    /// Where `known_clients` is persisted on disk.
+    pub known_clients_path: PathBuf,
     /// Log lines shown in the UI. Bounded — oldest entries drop.
     pub log_lines: Vec<String>,
 }
@@ -122,6 +137,19 @@ impl AppState {
         if self.log_lines.len() > CAP {
             let drop = self.log_lines.len() - CAP;
             self.log_lines.drain(..drop);
+        }
+    }
+
+    /// Reset every connected client's per-cue layer bookkeeping. Used
+    /// wherever `run` itself gets reset (blackout, stop, show (re)load) so a
+    /// stale STANDBY/active-layer reference from before the reset can't
+    /// mislead the next GO.
+    pub fn reset_client_layers(&mut self) {
+        for row in self.clients.values_mut() {
+            row.active_layer = None;
+            row.standby = None;
+            row.idle_free_utc_ms = 0;
+            row.now_playing = None;
         }
     }
 }

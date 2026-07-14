@@ -10,11 +10,12 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
 use multiplex_shared::protocol::{
-    ClientMsg, ClientState, ControllerMsg, Envelope, HelloAck, Layer, LoadCue, ShowSync,
-    PROTOCOL_VERSION,
+    AssignName, ClientMsg, ClientState, ControllerMsg, Envelope, HelloAck, Layer, LoadCue,
+    ShowSync, PROTOCOL_VERSION,
 };
 use multiplex_shared::show::Cue;
 
+use crate::known_clients::KnownClient;
 use crate::state::{ClientRow, Outgoing, SharedState};
 
 const OUTBOUND_QUEUE: usize = 64;
@@ -73,15 +74,6 @@ pub fn load_cue_for(cue: &Cue, layer: Layer) -> LoadCue {
         on_end: cue.on_end,
         fade_in_ms: cue.fade_in_ms,
     }
-}
-
-/// Build a STANDBY for whatever cue is currently on standby, so a client that
-/// joins after the controller already issued the standby still prerolls it.
-pub fn standby_msg(state: &SharedState) -> Option<ControllerMsg> {
-    let s = state.lock().unwrap();
-    let (cue_id, layer) = s.run.standby.as_ref()?;
-    let cue = s.show.as_ref()?.cues.iter().find(|c| &c.id == cue_id)?;
-    Some(ControllerMsg::Standby(load_cue_for(cue, *layer)))
 }
 
 async fn handle_conn(stream: TcpStream, addr: SocketAddr, state: SharedState) -> Result<()> {
@@ -143,6 +135,10 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, state: SharedState) ->
                 preflight: Default::default(),
                 push_progress: None,
                 outbound: out_tx.clone(),
+                active_layer: None,
+                standby: None,
+                idle_free_utc_ms: 0,
+                now_playing: None,
             },
         );
         let version = if hello.app_version.is_empty() { "?" } else { &hello.app_version };
@@ -150,6 +146,37 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, state: SharedState) ->
             "client {} ({}) v{version} joined from {addr}",
             hello.name, client_id
         ));
+    }
+
+    // Known-clients directory: upsert this client's entry. If the operator
+    // explicitly renamed it (via the roster) while it was disconnected, its
+    // self-reported HELLO name is stale — push the assigned name now so it
+    // converges immediately instead of waiting for a second reconnect.
+    let (assign_now, known_path, known_snapshot) = {
+        let mut s = state.lock().unwrap();
+        let entry = s.known_clients.entry(client_id.clone()).or_insert_with(|| KnownClient {
+            name: hello.name.clone(),
+            assigned: false,
+            last_seen_ms: now_ms,
+        });
+        if !entry.assigned {
+            entry.name = hello.name.clone();
+        }
+        entry.last_seen_ms = now_ms;
+        let mismatch = entry.assigned && entry.name != hello.name;
+        let name_to_send = entry.name.clone();
+        (
+            mismatch.then_some(name_to_send),
+            s.known_clients_path.clone(),
+            s.known_clients.clone(),
+        )
+    };
+    crate::known_clients::save(&known_path, &known_snapshot);
+    if let Some(name) = assign_now {
+        let _ = out_tx.try_send(Outgoing::Msg(ControllerMsg::AssignName(AssignName {
+            client_id: client_id.clone(),
+            name,
+        })));
     }
 
     // Send HELLO_ACK directly, then the current show (if loaded) via the queue.
@@ -164,11 +191,19 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, state: SharedState) ->
     if let Some(msg) = show_sync_msg(&state) {
         let _ = out_tx.try_send(Outgoing::Msg(msg));
     }
-    // Catch a joining client up on the current standby so its GO is instant
-    // too — the controller may have issued the standby before this client
-    // (or any client) was connected.
-    if let Some(msg) = standby_msg(&state) {
-        let _ = out_tx.try_send(Outgoing::Msg(msg));
+    // Catch a joining client up on any in-flight STANDBY for the currently
+    // selected cue, so its GO is instant too — the controller may have
+    // preloaded before this client (or any client) was connected. Scoped to
+    // this one client since STANDBY is per-client now, and skipped entirely
+    // if the selected cue doesn't even target this client.
+    let selected_cue = {
+        let s = state.lock().unwrap();
+        s.selected_cue_idx.and_then(|idx| s.show.as_ref()?.cues.get(idx).cloned())
+    };
+    if let Some(cue) = selected_cue {
+        if cue.targets(&client_id) {
+            crate::dispatch::standby_for_client(&state, &cue, &client_id);
+        }
     }
 
     // Split loops: read → state, write ← channel.
@@ -380,6 +415,18 @@ pub fn client_queue(state: &SharedState, client_id: &str) -> Option<mpsc::Sender
         .clients
         .get(client_id)
         .map(|c| c.outbound.clone())
+}
+
+/// Enqueue the same message to exactly these clients. Unknown or
+/// disconnected ids are silently skipped.
+pub fn send_to(state: &SharedState, client_ids: &[String], msg: ControllerMsg) {
+    let queues: Vec<_> = {
+        let s = state.lock().unwrap();
+        client_ids.iter().filter_map(|id| s.clients.get(id).map(|c| c.outbound.clone())).collect()
+    };
+    for q in queues {
+        let _ = q.try_send(Outgoing::Msg(msg.clone()));
+    }
 }
 
 pub fn log(state: &SharedState, line: impl Into<String>) {

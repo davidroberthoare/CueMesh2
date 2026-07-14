@@ -58,6 +58,9 @@ pub struct ConnectionConfig {
     pub client_id: String,
     pub name: String,
     pub media_root: PathBuf,
+    /// Where the persisted `{client_id, assigned_name}` identity file lives,
+    /// so an ASSIGN_NAME from the controller can be written back to disk.
+    pub identity_path: PathBuf,
 }
 
 fn media_layer(l: WireLayer) -> multiplex_media::Layer {
@@ -170,12 +173,14 @@ async fn connect_once(
     let (mut sink, mut source) = ws.split();
     let (out_tx, mut out_rx) = mpsc::channel::<ClientMsg>(64);
 
-    // Send HELLO.
+    // Send HELLO. Read the name live from state (not `cfg.name`) so a
+    // controller-assigned rename is reported on the very next HELLO instead
+    // of needing a process restart.
     let hello = Envelope::new(
         now_utc_ms(),
         ClientMsg::Hello(Hello {
             client_id: cfg.client_id.clone(),
-            name: cfg.name.clone(),
+            name: state.lock().unwrap().name.clone(),
             protocol_version: PROTOCOL_VERSION,
             app_version: update::APP_VERSION.into(),
             target_triple: update::TARGET_TRIPLE.into(),
@@ -535,6 +540,7 @@ fn preload_cue(
                 info.loops = c.loops;
                 info.on_end = c.on_end;
                 info.fade_ms = c.fade_in_ms;
+                info.epoch = info.epoch.wrapping_add(1);
                 s.playback.state = PlaybackState::Ready;
             }
             let _ = outbound.try_send(ClientMsg::Ready(Ready {
@@ -663,10 +669,24 @@ async fn handle_controller_msg(
             let dur = Duration::from_millis(cmd.duration_ms as u64);
             fades::fade(engine, multiplex_media::Layer::A, 0.0, dur);
             fades::fade(engine, multiplex_media::Layer::B, 0.0, dur);
+            let (epoch_a, epoch_b) = {
+                let s = state.lock().unwrap();
+                (s.playback.layer_a.epoch, s.playback.layer_b.epoch)
+            };
             let engine_clone = engine.clone();
             let state_clone = state.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(dur).await;
+                {
+                    let s = state_clone.lock().unwrap();
+                    // If a new cue was preloaded onto either layer while this
+                    // fade was sleeping, that newer content superseded this
+                    // FADE — skip the teardown so we don't stop/clear it out
+                    // from under whatever just loaded.
+                    if s.playback.layer_a.epoch != epoch_a || s.playback.layer_b.epoch != epoch_b {
+                        return;
+                    }
+                }
                 engine_clone.stop_all();
                 let mut s = state_clone.lock().unwrap();
                 s.playback.state = PlaybackState::Black;
@@ -781,6 +801,20 @@ async fn handle_controller_msg(
         }
         ControllerMsg::ApplyUpdate => {
             apply_update(state, outbound).await;
+        }
+        ControllerMsg::AssignName(a) => {
+            if a.client_id == cfg.client_id {
+                state.lock().unwrap().name = a.name.clone();
+                let identity = crate::identity::Identity {
+                    client_id: cfg.client_id.clone(),
+                    assigned_name: Some(a.name.clone()),
+                };
+                if let Err(e) = crate::identity::save(&cfg.identity_path, &identity) {
+                    log(state, format!("failed to persist assigned name: {e}"));
+                } else {
+                    log(state, format!("renamed to \"{}\"", a.name));
+                }
+            }
         }
     }
 }
@@ -1153,14 +1187,24 @@ fn spawn_media_event_pump(engine: MediaEngine, state: SharedState, _cfg: Arc<Con
                             *state.lock().unwrap().layer_mut(wire) = Default::default();
                         }
                         EndAction::Fade => {
-                            let fade_ms =
-                                state.lock().unwrap().layer_mut(wire).fade_ms.max(1);
+                            let (fade_ms, epoch) = {
+                                let mut s = state.lock().unwrap();
+                                let info = s.layer_mut(wire);
+                                (info.fade_ms.max(1), info.epoch)
+                            };
                             let dur = Duration::from_millis(fade_ms as u64);
                             fades::fade(&engine, layer, 0.0, dur);
                             let engine2 = engine.clone();
                             let state2 = state.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(dur + Duration::from_millis(50)).await;
+                                // Skip the teardown if a new cue has since
+                                // been preloaded onto this layer — it would
+                                // otherwise get stopped and reset right out
+                                // from under whatever just loaded there.
+                                if state2.lock().unwrap().layer_mut(wire).epoch != epoch {
+                                    return;
+                                }
                                 engine2.stop(layer);
                                 *state2.lock().unwrap().layer_mut(wire) = Default::default();
                             });

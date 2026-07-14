@@ -63,6 +63,12 @@ pub struct LayerInfo {
     pub on_end: EndAction,
     /// The cue's fade duration, used for an `on_end == Fade` fade-out.
     pub fade_ms: u32,
+    /// Bumped every time a new cue is preloaded onto this layer (LOAD_CUE or
+    /// STANDBY). Lets a delayed fade/stop teardown (spawned as a background
+    /// task that sleeps for the fade duration) detect that a newer cue has
+    /// since superseded it and skip clobbering that newer state — see the
+    /// FADE and `EndAction::Fade` handlers in `connection.rs`.
+    pub epoch: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

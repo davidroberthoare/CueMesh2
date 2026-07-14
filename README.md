@@ -115,6 +115,51 @@ Binaries end up in `target/release/`:
 
 ---
 
+## Local testing (multiple clients on one machine)
+
+You don't need a pile of Pis to try MultiPlex out — you can run the
+controller and several clients as separate processes on one machine.
+
+Each client persists a stable id (`client_id`) to a config file so cue
+targeting survives restarts — but that means **every client on the same
+machine reads the same file by default and ends up sharing one id.** Give
+each instance its own identity file with `MULTIPLEX_IDENTITY_PATH`:
+
+```sh
+# Terminal 1: controller
+cargo run --bin multiplex-controller
+
+# Terminal 2: client A
+MULTIPLEX_IDENTITY_PATH=/tmp/mp-client-a.toml \
+MULTIPLEX_NAME=client-a \
+MULTIPLEX_CANVAS=640x360@30 \
+cargo run --bin multiplex-client
+
+# Terminal 3: client B
+MULTIPLEX_IDENTITY_PATH=/tmp/mp-client-b.toml \
+MULTIPLEX_NAME=client-b \
+MULTIPLEX_CANVAS=640x360@30 \
+cargo run --bin multiplex-client
+```
+
+Notes:
+
+- `MULTIPLEX_MEDIA_ROOT` can stay the default/shared across instances —
+  preflight pushes every show file to every client regardless of which cues
+  target it, so there's no need for separate media folders just to test.
+- `MULTIPLEX_CANVAS` keeps the client windows small enough to tile on one
+  screen. They'll likely spawn stacked on top of each other — there's no
+  window-position env var, so just drag one aside.
+- To try per-client cue targeting: open the controller's show editor, set a
+  cue's **Targets** column to Whitelist and check only `client-a`, Apply,
+  then GO — only the client-a window should play it. The **If excluded**
+  column controls what the other client does instead (Ignore/Poster/Color).
+- To try renaming: click the pencil icon next to a client in the roster,
+  rename it, then restart that client (same `MULTIPLEX_IDENTITY_PATH`) and
+  confirm the name sticks even without setting `MULTIPLEX_NAME`.
+
+---
+
 ## Updating
 
 Updates are **operator-triggered from the controller** — nothing updates

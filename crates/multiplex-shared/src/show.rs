@@ -100,7 +100,7 @@ impl Default for SyncCorrection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Cue {
     pub id: String,
     pub name: String,
@@ -132,6 +132,73 @@ pub struct Cue {
     pub on_end: EndAction,
     #[serde(default)]
     pub notes: Option<String>,
+    /// Which clients this cue plays on. Defaults to `All` so shows saved
+    /// before this field existed reach every client, unchanged.
+    #[serde(default)]
+    pub target: CueTarget,
+    /// What a client excluded by `target` should do instead of loading/
+    /// playing this cue.
+    #[serde(default)]
+    pub exclude_action: ExcludeAction,
+    /// Solid colour excluded clients show when `exclude_action == Color`, as
+    /// `#RRGGBB`. Falls back to black if unset.
+    #[serde(default)]
+    pub exclude_color: Option<String>,
+}
+
+impl Cue {
+    /// Does this cue target `client_id`, per its [`CueTarget`]?
+    pub fn targets(&self, client_id: &str) -> bool {
+        match &self.target {
+            CueTarget::All => true,
+            CueTarget::Whitelist { clients } => clients.iter().any(|c| c == client_id),
+            CueTarget::Blacklist { clients } => !clients.iter().any(|c| c == client_id),
+        }
+    }
+}
+
+/// Split `all_ids` into (included, excluded) per `cue`'s targeting.
+pub fn partition_clients<'a>(
+    cue: &Cue,
+    all_ids: impl Iterator<Item = &'a str>,
+) -> (Vec<String>, Vec<String>) {
+    let mut included = Vec::new();
+    let mut excluded = Vec::new();
+    for id in all_ids {
+        if cue.targets(id) {
+            included.push(id.to_string());
+        } else {
+            excluded.push(id.to_string());
+        }
+    }
+    (included, excluded)
+}
+
+/// Which clients a cue plays on. `All` (the default) reaches every connected
+/// client, matching the behavior of every show file saved before this field
+/// existed.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase")]
+pub enum CueTarget {
+    #[default]
+    All,
+    /// Only these client ids (persistent client UUIDs).
+    Whitelist { clients: Vec<String> },
+    /// Every connected client except these ids.
+    Blacklist { clients: Vec<String> },
+}
+
+/// What an excluded client (per [`Cue::target`]) does when this cue plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExcludeAction {
+    /// Keep showing whatever was already on air; this cue simply isn't sent.
+    #[default]
+    Ignore,
+    /// Go to the show's idle poster.
+    Poster,
+    /// Show a solid colour (see [`Cue::exclude_color`]).
+    Color,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -351,6 +418,7 @@ crossfade_to_next_ms = 500
             loops: false,
             on_end: EndAction::Freeze,
             notes: Some("hello".into()),
+            ..Default::default()
         });
         sf.cues.push(Cue {
             id: "c2".into(),
@@ -364,6 +432,7 @@ crossfade_to_next_ms = 500
             loops: false,
             on_end: EndAction::default(),
             notes: None,
+            ..Default::default()
         });
         let tmp = std::env::temp_dir().join("multiplex_show_roundtrip.multiplex.toml");
         sf.save(&tmp).unwrap();
@@ -395,6 +464,7 @@ crossfade_to_next_ms = 500
             loops: false,
             on_end: EndAction::default(),
             notes: None,
+            ..Default::default()
         });
         assert!(matches!(sf.validate(), Err(ShowError::InvalidCue { .. })));
     }
@@ -414,6 +484,7 @@ crossfade_to_next_ms = 500
             loops: false,
             on_end: EndAction::default(),
             notes: None,
+            ..Default::default()
         });
         sf.validate().unwrap();
         // Media validation skips colour cues even with a bogus root.
@@ -425,6 +496,134 @@ crossfade_to_next_ms = 500
         assert_eq!(parse_hex_color("#FF8000"), [255, 128, 0]);
         assert_eq!(parse_hex_color("bad"), [0, 0, 0]);
         assert_eq!(format_hex_color([255, 128, 0]), "#FF8000");
+    }
+
+    #[test]
+    fn cue_target_defaults_to_all_when_missing() {
+        // A show saved before `target`/`exclude_action` existed must still
+        // parse, with every cue reaching every client as before.
+        let s = ShowFile::parse_str(EXAMPLE).unwrap();
+        assert_eq!(s.cues[0].target, CueTarget::All);
+        assert_eq!(s.cues[0].exclude_action, ExcludeAction::Ignore);
+        assert_eq!(s.cues[0].exclude_color, None);
+    }
+
+    #[test]
+    fn cue_target_whitelist_blacklist_color_roundtrip() {
+        let mut sf = ShowFile::new_empty("Targeting");
+        sf.cues.push(Cue {
+            id: "c1".into(),
+            name: "Whitelisted".into(),
+            kind: CueKind::Video,
+            file: PathBuf::from("a.mp4"),
+            target: CueTarget::Whitelist {
+                clients: vec!["client-a".into(), "client-b".into()],
+            },
+            exclude_action: ExcludeAction::Color,
+            exclude_color: Some("#112233".into()),
+            ..Default::default()
+        });
+        sf.cues.push(Cue {
+            id: "c2".into(),
+            name: "Blacklisted".into(),
+            kind: CueKind::Video,
+            file: PathBuf::from("b.mp4"),
+            target: CueTarget::Blacklist {
+                clients: vec!["client-c".into()],
+            },
+            exclude_action: ExcludeAction::Poster,
+            ..Default::default()
+        });
+        let tmp = std::env::temp_dir().join("multiplex_show_target_roundtrip.multiplex.toml");
+        sf.save(&tmp).unwrap();
+        let back = ShowFile::load(&tmp).unwrap();
+        assert_eq!(
+            back.cues[0].target,
+            CueTarget::Whitelist {
+                clients: vec!["client-a".into(), "client-b".into()]
+            }
+        );
+        assert_eq!(back.cues[0].exclude_action, ExcludeAction::Color);
+        assert_eq!(back.cues[0].exclude_color.as_deref(), Some("#112233"));
+        assert_eq!(
+            back.cues[1].target,
+            CueTarget::Blacklist {
+                clients: vec!["client-c".into()]
+            }
+        );
+        assert_eq!(back.cues[1].exclude_action, ExcludeAction::Poster);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn targets_all() {
+        let cue = Cue {
+            target: CueTarget::All,
+            ..Default::default()
+        };
+        assert!(cue.targets("anything"));
+        let (included, excluded) = partition_clients(&cue, ["a", "b", "c"].into_iter());
+        assert_eq!(included, vec!["a", "b", "c"]);
+        assert!(excluded.is_empty());
+    }
+
+    #[test]
+    fn targets_whitelist() {
+        let cue = Cue {
+            target: CueTarget::Whitelist {
+                clients: vec!["a".into(), "c".into()],
+            },
+            ..Default::default()
+        };
+        assert!(cue.targets("a"));
+        assert!(!cue.targets("b"));
+        let (included, excluded) = partition_clients(&cue, ["a", "b", "c"].into_iter());
+        assert_eq!(included, vec!["a", "c"]);
+        assert_eq!(excluded, vec!["b"]);
+    }
+
+    #[test]
+    fn targets_blacklist() {
+        let cue = Cue {
+            target: CueTarget::Blacklist {
+                clients: vec!["b".into()],
+            },
+            ..Default::default()
+        };
+        assert!(cue.targets("a"));
+        assert!(!cue.targets("b"));
+        let (included, excluded) = partition_clients(&cue, ["a", "b", "c"].into_iter());
+        assert_eq!(included, vec!["a", "c"]);
+        assert_eq!(excluded, vec!["b"]);
+    }
+
+    #[test]
+    fn empty_whitelist_excludes_everyone() {
+        let cue = Cue {
+            target: CueTarget::Whitelist { clients: vec![] },
+            ..Default::default()
+        };
+        let (included, excluded) = partition_clients(&cue, ["a", "b"].into_iter());
+        assert!(included.is_empty());
+        assert_eq!(excluded, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn offline_targeted_client_is_simply_absent_not_an_error() {
+        // A whitelist entry for a client that isn't currently connected
+        // shouldn't appear in either partition — it's not an error condition,
+        // `partition_clients` only ever reasons about the ids it's given.
+        let cue = Cue {
+            target: CueTarget::Whitelist {
+                clients: vec!["offline-client".into(), "a".into()],
+            },
+            ..Default::default()
+        };
+        let (included, excluded) = partition_clients(&cue, ["a", "b"].into_iter());
+        assert_eq!(included, vec!["a"]);
+        assert_eq!(excluded, vec!["b"]);
+        assert!(!included.contains(&"offline-client".to_string()));
+        assert!(!excluded.contains(&"offline-client".to_string()));
     }
 
     #[test]

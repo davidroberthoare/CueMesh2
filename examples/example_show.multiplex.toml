@@ -24,6 +24,12 @@ in_ms = 5000
 out_ms = 10000
 loop = true
 on_end = "cut"
+exclude_action = "color"
+exclude_color = "#3A00F4"
+
+[cues.target]
+mode = "whitelist"
+clients = ["c7633802-2de5-4cc7-a532-ff8d6778d54e"]
 
 [[cues]]
 id = "cue-003"
@@ -34,6 +40,10 @@ fade_in_ms = 2000
 in_ms = 40000
 loop = false
 on_end = "fade"
+exclude_action = "ignore"
+
+[cues.target]
+mode = "all"
 
 [[cues]]
 id = "cue-004"
@@ -45,10 +55,15 @@ fade_in_ms = 1500
 in_ms = 0
 loop = false
 on_end = "cut"
+exclude_action = "ignore"
+
+[cues.target]
+mode = "blacklist"
+clients = ["c7633802-2de5-4cc7-a532-ff8d6778d54e"]
 
 [[cues]]
 id = "cue-0001"
-name = "Fade to Black"
+name = "Fade to RED"
 type = "color"
 file = ""
 color = "#F20000"
@@ -56,6 +71,10 @@ fade_in_ms = 1500
 in_ms = 0
 loop = false
 on_end = "cut"
+exclude_action = "ignore"
+
+[cues.target]
+mode = "all"
 
 [[cues]]
 id = "cue-0002"
@@ -66,6 +85,10 @@ fade_in_ms = 1000
 in_ms = 20000
 loop = false
 on_end = "cut"
+exclude_action = "ignore"
+
+[cues.target]
+mode = "all"
 
 [[cues]]
 id = "cue-0003"
@@ -76,3 +99,7 @@ fade_in_ms = 0
 in_ms = 0
 loop = false
 on_end = "cut"
+exclude_action = "ignore"
+
+[cues.target]
+mode = "all"

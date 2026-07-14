@@ -4,6 +4,7 @@
 
 pub mod connection;
 pub mod discovery;
+pub mod identity;
 pub mod state;
 pub mod ui;
 pub mod update;

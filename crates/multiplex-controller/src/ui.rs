@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 use egui_file_dialog::FileDialog;
 use egui_phosphor::regular as icon;
 
-use multiplex_shared::protocol::{ControllerMsg, FadeCmd, Layer, MediaFileStatus, PlayAt};
+use multiplex_shared::protocol::{ControllerMsg, FadeCmd, MediaFileStatus};
 use multiplex_shared::show::{CueKind, ShowFile};
 
 use crate::editor::{EditorAction, EditorState};
 use crate::preflight;
-use crate::server::{broadcast, load_cue_for, now_utc_ms};
+use crate::server::{broadcast, now_utc_ms};
 use crate::state::{ClientUpdate, SelfUpdate, SharedState};
 use crate::update;
 
@@ -31,16 +31,6 @@ fn show_dialog() -> FileDialog {
 /// arrow-key scrolling from firing a cold decode on every intermediate cue.
 const SELECTION_SETTLE_MS: u128 = 150;
 
-/// The layer the next GO (and thus the next STANDBY) will target: the opposite
-/// of whatever is currently on air, or A when nothing is playing.
-fn idle_layer(active: Option<Layer>) -> Layer {
-    match active {
-        Some(Layer::A) => Layer::B,
-        Some(Layer::B) => Layer::A,
-        None => Layer::A,
-    }
-}
-
 pub struct ControllerApp {
     state: SharedState,
     testscreen_on: bool,
@@ -53,6 +43,10 @@ pub struct ControllerApp {
     open_dialog: FileDialog,
     /// Editor "Save as…" picker.
     save_dialog: FileDialog,
+    /// In-progress rename text, keyed by client id, while its roster row's
+    /// rename field is open. Pure UI scratch state — not persisted here;
+    /// `known_clients::rename` is what actually commits a rename.
+    rename_drafts: std::collections::HashMap<String, String>,
 }
 
 impl ControllerApp {
@@ -65,6 +59,7 @@ impl ControllerApp {
             selected_since: Instant::now(),
             open_dialog: show_dialog(),
             save_dialog: show_dialog(),
+            rename_drafts: std::collections::HashMap::new(),
         };
         // Auto-load the show named by MULTIPLEX_SHOW so headless-ish setups
         // (and operators with a fixed show) skip the open dialog entirely.
@@ -83,6 +78,7 @@ impl ControllerApp {
                     s.show_path = Some(path.clone());
                     s.selected_cue_idx = Some(0);
                     s.run = Default::default();
+                    s.reset_client_layers();
                     s.local_media = None;
                     s.push_log(format!("loaded show {}", path.display()));
                 }
@@ -97,73 +93,43 @@ impl ControllerApp {
         }
     }
 
-    /// Fire the selected cue: start it with lead time, crossfading from
-    /// whatever is on air. If the cue was already pre-loaded on the target
-    /// layer via STANDBY, this is just a PLAY_AT and starts instantly;
-    /// otherwise it falls back to loading now (a cold decode that will stall).
-    /// Advances the selection.
+    /// Fire the selected cue on every client it targets, with lead time,
+    /// crossfading from whatever each of those clients has on air — each
+    /// client's own layer/STANDBY state (on its `ClientRow`) decides whether
+    /// its LOAD_CUE is skipped in favour of an instant PLAY_AT, same as
+    /// before, just resolved per client instead of once for the whole fleet.
+    /// Clients this cue excludes get its `exclude_action` instead. Advances
+    /// the selection.
     fn go_selected(&self) {
         let plan = {
             let mut s = self.state.lock().unwrap();
             let Some(show) = &s.show else { return };
             let Some(idx) = s.selected_cue_idx else { return };
             let Some(cue) = show.cues.get(idx).cloned() else { return };
-
-            let on_air = s.run.playing_cue_idx.and_then(|i| show.cues.get(i)).is_some();
             let n = show.cues.len();
             let lead_ms = show.show.sync.start_lead_ms.max(250) as u64;
-            let target_layer = idle_layer(s.run.active_layer);
-            // Crossfade when something is on air. The incoming cue's fade-in is
-            // the single knob for both fade-from-black and crossfade duration;
-            // never below 40ms (a near-cut, but glitch-free).
-            let crossfade_ms = on_air.then(|| cue.fade_in_ms.max(40));
-
-            // Did STANDBY already preload this exact cue on this layer?
-            let preloaded = s.run.standby.as_ref() == Some(&(cue.id.clone(), target_layer));
+            let all_ids: Vec<String> = s.clients.keys().cloned().collect();
 
             s.run.playing_cue_idx = Some(idx);
-            s.run.active_layer = Some(target_layer);
-            // Standby is consumed (or invalidated by an out-of-order GO).
-            s.run.standby = None;
-            // The layer the *next* GO targets is the one we're now fading
-            // away from; hold the next STANDBY off it until the crossfade has
-            // finished (loading resets a layer's alpha to 0, which would cut
-            // the outgoing video). A cut (no crossfade) frees it immediately.
-            s.run.idle_free_utc_ms = match crossfade_ms {
-                Some(ms) => now_utc_ms() + lead_ms + ms as u64 + 300,
-                None => 0,
-            };
             s.selected_cue_idx = Some((idx + 1).min(n.saturating_sub(1)));
-            s.push_log(format!(
-                "GO cue {} on layer {target_layer:?}{}",
-                cue.id,
-                if preloaded { " (preloaded)" } else { " (cold load)" }
-            ));
-            (cue, target_layer, crossfade_ms, lead_ms, preloaded)
+            s.push_log(format!("GO cue {}", cue.id));
+            (cue, lead_ms, all_ids)
         };
-        let (cue, layer, crossfade_ms, lead_ms, preloaded) = plan;
-
-        // Only send LOAD_CUE when the media isn't already prerolled from a
-        // STANDBY — otherwise we'd trigger a redundant cold decode and lose
-        // the head start entirely.
-        if !preloaded {
-            broadcast(&self.state, ControllerMsg::LoadCue(load_cue_for(&cue, layer)));
+        let (cue, lead_ms, all_ids) = plan;
+        let (included, excluded) =
+            multiplex_shared::show::partition_clients(&cue, all_ids.iter().map(String::as_str));
+        for client_id in &included {
+            crate::dispatch::go_for_client(&self.state, &cue, client_id, lead_ms);
         }
-        broadcast(
-            &self.state,
-            ControllerMsg::PlayAt(PlayAt {
-                layer,
-                master_start_utc_ms: now_utc_ms() + lead_ms,
-                fade_in_ms: cue.fade_in_ms,
-                crossfade_ms,
-            }),
-        );
+        crate::dispatch::apply_exclude_action(&self.state, &cue, &excluded, lead_ms);
     }
 
-    /// Preload the selected cue onto the layer the next GO will use, so that
-    /// GO starts instantly. Debounced (so scrolling doesn't thrash clients)
-    /// and gated on the target layer being free (not mid-crossfade). Idempotent
-    /// — re-preloads only when the desired (cue, layer) actually changes.
+    /// Preload the selected cue onto the layer the next GO will use, for
+    /// every client it targets, so that GO starts instantly. Debounced (so
+    /// scrolling doesn't thrash clients); per-client gating (already
+    /// preloaded, target layer still mid-crossfade) lives in
+    /// `dispatch::standby_for_client`. Clients the cue excludes get no
+    /// STANDBY — there's nothing to hide a cold decode for.
     fn maybe_standby(&self) {
         if self.selected_since.elapsed().as_millis() < SELECTION_SETTLE_MS {
             return;
@@ -173,23 +139,13 @@ impl ControllerApp {
             let Some(show) = &s.show else { return };
             let Some(idx) = s.selected_cue_idx else { return };
             let Some(cue) = show.cues.get(idx).cloned() else { return };
-            let target = idle_layer(s.run.active_layer);
-            // Already pre-loaded on the right layer, or the layer is still
-            // finishing a crossfade-out.
-            if s.run.standby.as_ref() == Some(&(cue.id.clone(), target))
-                || now_utc_ms() < s.run.idle_free_utc_ms
-            {
-                return;
-            }
-            (cue, target)
+            let all_ids: Vec<String> = s.clients.keys().cloned().collect();
+            (cue, all_ids)
         };
-        let (cue, target) = plan;
-        {
-            let mut s = self.state.lock().unwrap();
-            s.run.standby = Some((cue.id.clone(), target));
-            s.push_log(format!("STANDBY cue {} on layer {target:?}", cue.id));
+        let (cue, all_ids) = plan;
+        for client_id in all_ids.iter().filter(|id| cue.targets(id)) {
+            crate::dispatch::standby_for_client(&self.state, &cue, client_id);
         }
-        broadcast(&self.state, ControllerMsg::Standby(load_cue_for(&cue, target)));
     }
 
     fn move_selection(&self, delta: i64) {
@@ -204,7 +160,11 @@ impl ControllerApp {
     }
 
     fn blackout(&self) {
-        self.state.lock().unwrap().run = Default::default();
+        {
+            let mut s = self.state.lock().unwrap();
+            s.run = Default::default();
+            s.reset_client_layers();
+        }
         broadcast(
             &self.state,
             ControllerMsg::Fade(FadeCmd {
@@ -214,20 +174,38 @@ impl ControllerApp {
     }
 
     fn stop_all(&self) {
-        self.state.lock().unwrap().run = Default::default();
+        {
+            let mut s = self.state.lock().unwrap();
+            s.run = Default::default();
+            s.reset_client_layers();
+        }
         broadcast(&self.state, ControllerMsg::Stop);
     }
 
     /// Enter the editor seeded from the running show (or a blank one).
     fn open_editor(&mut self, blank: bool) {
-        let (show, path) = {
+        let (show, path, known_clients) = {
             let s = self.state.lock().unwrap();
-            (s.show.clone(), s.show_path.clone())
+            // Merge the durable known-clients directory (covers offline
+            // clients) with the live roster (authoritative name while
+            // connected), so the cue editor's client picker can target
+            // anyone the operator has ever seen, not just who's online now.
+            let mut merged: std::collections::HashMap<String, String> = s
+                .known_clients
+                .iter()
+                .map(|(id, kc)| (id.clone(), kc.name.clone()))
+                .collect();
+            for (id, row) in &s.clients {
+                merged.insert(id.clone(), row.name.clone());
+            }
+            let mut known_clients: Vec<(String, String)> = merged.into_iter().collect();
+            known_clients.sort_by(|a, b| a.1.cmp(&b.1));
+            (s.show.clone(), s.show_path.clone(), known_clients)
         };
         if blank {
-            self.editor.enter(None, None);
+            self.editor.enter(None, None, known_clients);
         } else {
-            self.editor.enter(show.as_ref(), path.as_deref());
+            self.editor.enter(show.as_ref(), path.as_deref(), known_clients);
         }
     }
 
@@ -240,6 +218,7 @@ impl ControllerApp {
             s.show = Some(show);
             s.selected_cue_idx = if empty { None } else { Some(0) };
             s.run = Default::default();
+            s.reset_client_layers();
             s.local_media = None;
             s.push_log("show updated from editor");
         }
@@ -534,7 +513,35 @@ impl eframe::App for ControllerApp {
                     ui.horizontal(|ui| {
                         ui.colored_label(dot_color, icon::CIRCLE);
                         ui.label(format!("{}  ({})", c.name, &c.client_id[..8.min(c.client_id.len())]));
+                        if ui.small_button(icon::PENCIL_SIMPLE).on_hover_text("Rename").clicked() {
+                            self.rename_drafts.entry(c.client_id.clone()).or_insert_with(|| c.name.clone());
+                        }
                     });
+                    // Inline rename: commits via `known_clients::rename`, which
+                    // marks the client `assigned` (so its own HELLO can't
+                    // silently overwrite this name again) and pushes
+                    // ASSIGN_NAME immediately if it's still connected.
+                    if let Some(draft) = self.rename_drafts.get(&c.client_id).cloned() {
+                        let mut draft = draft;
+                        let mut commit = false;
+                        let mut cancel = false;
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(&mut draft);
+                            commit = ui.small_button(icon::CHECK).clicked();
+                            cancel = ui.small_button(icon::X).clicked();
+                        });
+                        if commit {
+                            let name = draft.trim().to_string();
+                            if !name.is_empty() {
+                                crate::known_clients::rename(&self.state, &c.client_id, &name);
+                            }
+                            self.rename_drafts.remove(&c.client_id);
+                        } else if cancel {
+                            self.rename_drafts.remove(&c.client_id);
+                        } else {
+                            self.rename_drafts.insert(c.client_id.clone(), draft);
+                        }
+                    }
                     ui.label(format!("addr: {}   state: {:?}", c.addr, c.state));
                     if let Some(cue) = &c.current_cue {
                         ui.label(format!("cue: {cue}  @ {}", fmt_ms(c.position_ms)));

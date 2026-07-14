@@ -13,13 +13,19 @@
 //!                          (default 1920x1080@30)
 //!   `MULTIPLEX_DRIFT`      — set to `off` to report but never correct drift
 //!                          (debugging aid for playback smoothness)
+//!   `MULTIPLEX_IDENTITY_PATH` — where the persisted {client_id, assigned
+//!                          name} file lives (default: a per-OS config dir).
+//!                          Set this to run more than one client on a single
+//!                          machine (e.g. local testing) — otherwise every
+//!                          instance shares one identity file and reports
+//!                          the same client_id.
 //!
 //! Press `F` or `F11` to toggle native OS fullscreen — there's no window
 //! chrome to trigger it from otherwise.
 //!
 //! See `CLAUDE.md` at the workspace root for the design brief.
 
-use multiplex_client::{connection, discovery, state, ui, update};
+use multiplex_client::{connection, discovery, identity, state, ui, update};
 use multiplex_media::{Canvas, MediaEngine};
 
 /// Parse `WxH@FPS` (e.g. `1280x720@30`); None on any malformed part.
@@ -48,11 +54,21 @@ fn main() -> anyhow::Result<()> {
 
     let controller_url = std::env::var("MULTIPLEX_CONTROLLER")
         .unwrap_or_else(|_| "ws://127.0.0.1:9420".to_string());
-    let name = std::env::var("MULTIPLEX_NAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .unwrap_or_else(|_| "multiplex-client".into());
-    let client_id = uuid::Uuid::new_v4().to_string();
+
+    // A stable client_id (persisted across restarts) is what a cue's
+    // whitelist/blacklist anchors to. `assigned_name`, once the controller
+    // has ever set one, wins over MULTIPLEX_NAME/hostname on every later
+    // launch until reassigned.
+    let identity_path = identity::default_path();
+    let identity = identity::load_or_create(&identity_path);
+    let client_id = identity.client_id.clone();
+    let name = identity
+        .assigned_name
+        .clone()
+        .or_else(|| std::env::var("MULTIPLEX_NAME").ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .unwrap_or_else(|| "multiplex-client".into());
     let media_root = std::env::var("MULTIPLEX_MEDIA_ROOT")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
@@ -93,6 +109,7 @@ fn main() -> anyhow::Result<()> {
                 client_id,
                 name,
                 media_root,
+                identity_path,
             },
             conn_state,
             conn_engine,

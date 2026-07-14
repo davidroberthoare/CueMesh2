@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use egui_phosphor::regular as icon;
 
 use multiplex_shared::show::{
-    format_hex_color, parse_hex_color, Cue, CueKind, DropoutPolicy, EndAction, Poster, Show,
-    ShowFile, SyncConfig, SyncCorrection,
+    format_hex_color, parse_hex_color, Cue, CueKind, CueTarget, DropoutPolicy, EndAction,
+    ExcludeAction, Poster, Show, ShowFile, SyncConfig, SyncCorrection,
 };
 
 use crate::util::expand_tilde;
@@ -59,6 +59,25 @@ struct CueDraft {
     loops: bool,
     on_end: EndAction,
     notes: String,
+    /// Which clients this cue plays on.
+    target_mode: TargetMode,
+    /// Selected client ids; meaningful only when `target_mode != All`. Kept
+    /// around across mode switches so toggling Whitelist ↔ Blacklist doesn't
+    /// discard the operator's selection.
+    target_clients: Vec<String>,
+    exclude_action: ExcludeAction,
+    /// Solid colour for excluded clients when `exclude_action == Color`.
+    exclude_color: [u8; 3],
+}
+
+/// UI-friendly mirror of [`CueTarget`]'s mode, decoupled from its client list
+/// so the list survives a mode switch (see [`CueDraft::target_clients`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum TargetMode {
+    #[default]
+    All,
+    Whitelist,
+    Blacklist,
 }
 
 impl Default for CueDraft {
@@ -77,12 +96,21 @@ impl Default for CueDraft {
             loops: false,
             on_end: EndAction::default(),
             notes: String::new(),
+            target_mode: TargetMode::default(),
+            target_clients: Vec::new(),
+            exclude_action: ExcludeAction::default(),
+            exclude_color: [0, 0, 0],
         }
     }
 }
 
 impl CueDraft {
     fn from_cue(c: &Cue) -> Self {
+        let (target_mode, target_clients) = match &c.target {
+            CueTarget::All => (TargetMode::All, Vec::new()),
+            CueTarget::Whitelist { clients } => (TargetMode::Whitelist, clients.clone()),
+            CueTarget::Blacklist { clients } => (TargetMode::Blacklist, clients.clone()),
+        };
         Self {
             id: c.id.clone(),
             name: c.name.clone(),
@@ -96,6 +124,10 @@ impl CueDraft {
             loops: c.loops,
             on_end: c.on_end,
             notes: c.notes.clone().unwrap_or_default(),
+            target_mode,
+            target_clients,
+            exclude_action: c.exclude_action,
+            exclude_color: c.exclude_color.as_deref().map(parse_hex_color).unwrap_or([0, 0, 0]),
         }
     }
 
@@ -127,6 +159,18 @@ impl CueDraft {
             } else {
                 Some(notes.to_string())
             },
+            target: match self.target_mode {
+                TargetMode::All => CueTarget::All,
+                TargetMode::Whitelist => CueTarget::Whitelist {
+                    clients: self.target_clients.clone(),
+                },
+                TargetMode::Blacklist => CueTarget::Blacklist {
+                    clients: self.target_clients.clone(),
+                },
+            },
+            exclude_action: self.exclude_action,
+            exclude_color: (self.exclude_action == ExcludeAction::Color)
+                .then(|| format_hex_color(self.exclude_color)),
         }
     }
 }
@@ -159,6 +203,11 @@ pub struct EditorState {
     status: String,
     /// Monotonic counter for generating hidden cue ids.
     id_counter: u32,
+    /// (client_id, display name) for every client the operator can target in
+    /// a cue's whitelist/blacklist — connected now, or merely known from a
+    /// past connection/rename. Set on `enter()`; the editor has no direct
+    /// access to `AppState` to look this up itself.
+    known_clients: Vec<(String, String)>,
 }
 
 /// A deferred structural edit to the cue list, applied after the row loop so
@@ -172,12 +221,14 @@ enum RowOp {
 
 impl EditorState {
     /// Enter edit mode, seeding the draft from an existing show (or a blank
-    /// one) and the path it was loaded from.
-    pub fn enter(&mut self, show: Option<&ShowFile>, path: Option<&Path>) {
+    /// one), the path it was loaded from, and the clients (connected or
+    /// merely known) the operator can target in a cue's whitelist/blacklist.
+    pub fn enter(&mut self, show: Option<&ShowFile>, path: Option<&Path>, known_clients: Vec<(String, String)>) {
         let show = match show {
             Some(s) => s.clone(),
             None => ShowFile::new_empty("Untitled Show"),
         };
+        self.known_clients = known_clients;
         self.title = show.show.title.clone();
         self.version = show.show.version;
         self.media_root = show.show.media_root.to_string_lossy().into_owned();
@@ -441,14 +492,18 @@ impl EditorState {
 
         let mut op: Option<RowOp> = None;
         let media_files = self.media_files.clone();
+        let known_clients = self.known_clients.clone();
         let n = self.cues.len();
         egui::ScrollArea::horizontal().show(ui, |ui| {
         egui::Grid::new("cue_table")
-            .num_columns(9)
+            .num_columns(11)
             .striped(true)
             .spacing([10.0, 6.0])
             .show(ui, |ui| {
-                for h in ["Name", "Type", "Source", "In (s)", "Out (s)", "Loop", "On end", "Fade-in (ms)", ""] {
+                for h in [
+                    "Name", "Type", "Source", "In (s)", "Out (s)", "Loop", "On end", "Fade-in (ms)",
+                    "Targets", "If excluded", "",
+                ] {
                     ui.strong(h);
                 }
                 ui.end_row();
@@ -520,6 +575,60 @@ impl EditorState {
                         });
 
                     ui.add(egui::DragValue::new(&mut cue.fade_in_ms).range(0..=30_000));
+
+                    // Targets: All/Whitelist/Blacklist, plus a checkbox
+                    // multi-select of known clients when not All.
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt(("target_mode", i))
+                            .selected_text(match cue.target_mode {
+                                TargetMode::All => "All",
+                                TargetMode::Whitelist => "Whitelist",
+                                TargetMode::Blacklist => "Blacklist",
+                            })
+                            .width(84.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut cue.target_mode, TargetMode::All, "All");
+                                ui.selectable_value(&mut cue.target_mode, TargetMode::Whitelist, "Whitelist");
+                                ui.selectable_value(&mut cue.target_mode, TargetMode::Blacklist, "Blacklist");
+                            });
+                        if cue.target_mode != TargetMode::All {
+                            let summary = format!("{}/{}", cue.target_clients.len(), known_clients.len());
+                            ui.menu_button(summary, |ui| {
+                                if known_clients.is_empty() {
+                                    ui.label("(no known clients)");
+                                }
+                                for (id, name) in &known_clients {
+                                    let mut checked = cue.target_clients.contains(id);
+                                    if ui.checkbox(&mut checked, name).changed() {
+                                        if checked {
+                                            cue.target_clients.push(id.clone());
+                                        } else {
+                                            cue.target_clients.retain(|c| c != id);
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    });
+
+                    // If excluded: what a non-targeted client does instead.
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt(("exclude_action", i))
+                            .selected_text(match cue.exclude_action {
+                                ExcludeAction::Ignore => "Ignore",
+                                ExcludeAction::Poster => "Poster",
+                                ExcludeAction::Color => "Color",
+                            })
+                            .width(76.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut cue.exclude_action, ExcludeAction::Ignore, "Ignore");
+                                ui.selectable_value(&mut cue.exclude_action, ExcludeAction::Poster, "Poster");
+                                ui.selectable_value(&mut cue.exclude_action, ExcludeAction::Color, "Color");
+                            });
+                        if cue.exclude_action == ExcludeAction::Color {
+                            ui.color_edit_button_srgb(&mut cue.exclude_color);
+                        }
+                    });
 
                     ui.horizontal(|ui| {
                         if ui.add_enabled(i > 0, egui::Button::new(icon::ARROW_UP)).clicked() {
@@ -614,6 +723,7 @@ mod tests {
             loops: true,
             on_end: EndAction::Freeze,
             notes: Some("first".into()),
+            ..Default::default()
         });
         sf.cues.push(Cue {
             id: "c2".into(),
@@ -627,10 +737,11 @@ mod tests {
             loops: false,
             on_end: EndAction::default(),
             notes: None,
+            ..Default::default()
         });
 
         let mut ed = EditorState::default();
-        ed.enter(Some(&sf), Some(Path::new("/tmp/show.multiplex.toml")));
+        ed.enter(Some(&sf), Some(Path::new("/tmp/show.multiplex.toml")), Vec::new());
         let built = ed.build();
 
         assert_eq!(built.show.title, "Editor Test");
@@ -655,7 +766,7 @@ mod tests {
     #[test]
     fn build_fills_missing_ids_uniquely() {
         let mut ed = EditorState::default();
-        ed.enter(None, None);
+        ed.enter(None, None, Vec::new());
         ed.cues.push(CueDraft {
             id: String::new(),
             file: "a.mp4".into(),
@@ -676,7 +787,7 @@ mod tests {
     #[test]
     fn add_and_reorder_cues() {
         let mut ed = EditorState::default();
-        ed.enter(None, None);
+        ed.enter(None, None, Vec::new());
         ed.cues.push(CueDraft {
             id: "a".into(),
             file: "a.mp4".into(),
@@ -694,5 +805,46 @@ mod tests {
         assert_eq!(ed.cues.len(), 3);
         ed.apply_row_op(RowOp::Delete(1));
         assert_eq!(ed.cues.len(), 2);
+    }
+
+    #[test]
+    fn cue_target_and_exclude_action_roundtrip_through_draft() {
+        let mut sf = ShowFile::new_empty("Targeting");
+        sf.cues.push(Cue {
+            id: "c1".into(),
+            name: "Whitelisted".into(),
+            kind: CueKind::Video,
+            file: PathBuf::from("a.mp4"),
+            target: CueTarget::Whitelist {
+                clients: vec!["client-a".into(), "client-b".into()],
+            },
+            exclude_action: ExcludeAction::Color,
+            exclude_color: Some("#ABCDEF".into()),
+            ..Default::default()
+        });
+
+        let known = vec![
+            ("client-a".to_string(), "Center".to_string()),
+            ("client-b".to_string(), "Left".to_string()),
+            ("client-c".to_string(), "Right".to_string()),
+        ];
+        let mut ed = EditorState::default();
+        ed.enter(Some(&sf), None, known);
+        assert_eq!(ed.cues[0].target_mode, TargetMode::Whitelist);
+        assert_eq!(ed.cues[0].target_clients, vec!["client-a", "client-b"]);
+        assert_eq!(ed.cues[0].exclude_action, ExcludeAction::Color);
+
+        // Toggling mode preserves the selected clients (no data loss on a
+        // Whitelist ↔ Blacklist switch in the UI).
+        ed.cues[0].target_mode = TargetMode::Blacklist;
+        let built = ed.build();
+        assert_eq!(
+            built.cues[0].target,
+            CueTarget::Blacklist {
+                clients: vec!["client-a".into(), "client-b".into()]
+            }
+        );
+        assert_eq!(built.cues[0].exclude_action, ExcludeAction::Color);
+        assert_eq!(built.cues[0].exclude_color.as_deref(), Some("#ABCDEF"));
     }
 }

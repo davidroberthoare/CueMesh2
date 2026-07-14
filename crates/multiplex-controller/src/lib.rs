@@ -2,8 +2,10 @@
 //! and the operator UI. The `multiplex-controller` binary is a thin wrapper;
 //! the split exists so integration tests can drive the server directly.
 
+pub mod dispatch;
 pub mod discovery;
 pub mod editor;
+pub mod known_clients;
 pub mod preflight;
 pub mod server;
 pub mod state;

@@ -60,6 +60,7 @@ async fn client_stages_pushed_update_and_refuses_apply_while_playing() {
             client_id: "wire-test".into(),
             name: "Wire Test".into(),
             media_root,
+            identity_path: std::env::temp_dir().join("multiplex_update_over_wire_identity.toml"),
         };
         tokio::spawn(async move {
             connection::run(cfg, run_state, run_engine).await;

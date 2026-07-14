@@ -103,6 +103,17 @@ pub enum ControllerMsg {
     /// Operator-confirmed apply of a previously staged update. The client
     /// swaps its binary and re-execs only if idle; otherwise it refuses.
     ApplyUpdate,
+    /// Assign this client a display name, keyed by its persistent client id.
+    /// Sent to one client only (never broadcast). The client persists the
+    /// name locally and applies it immediately; its next HELLO (this
+    /// connection or a future one) reports it back.
+    AssignName(AssignName),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssignName {
+    pub client_id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -575,6 +586,11 @@ mod tests {
                     loops: false,
                     on_end: EndAction::default(),
                     notes: None,
+                    target: crate::show::CueTarget::Whitelist {
+                        clients: vec!["client-a".into()],
+                    },
+                    exclude_action: crate::show::ExcludeAction::Color,
+                    exclude_color: Some("#123456".into()),
                 }],
             }),
         );
@@ -587,6 +603,34 @@ mod tests {
                 assert_eq!(s.poster.as_ref().map(|p| p.file.clone()), Some(PathBuf::from("poster.jpg")));
                 assert_eq!(s.cues.len(), 1);
                 assert_eq!(s.cues[0].kind, CueKind::Image);
+                assert_eq!(
+                    s.cues[0].target,
+                    crate::show::CueTarget::Whitelist {
+                        clients: vec!["client-a".into()]
+                    }
+                );
+                assert_eq!(s.cues[0].exclude_action, crate::show::ExcludeAction::Color);
+                assert_eq!(s.cues[0].exclude_color.as_deref(), Some("#123456"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn assign_name_roundtrip() {
+        let env = Envelope::new(
+            3,
+            ControllerMsg::AssignName(AssignName {
+                client_id: "client-a".into(),
+                name: "center-top".into(),
+            }),
+        );
+        let json = serde_json::to_string(&env).unwrap();
+        let back: Envelope<ControllerMsg> = serde_json::from_str(&json).unwrap();
+        match back.msg {
+            ControllerMsg::AssignName(a) => {
+                assert_eq!(a.client_id, "client-a");
+                assert_eq!(a.name, "center-top");
             }
             _ => panic!("wrong variant"),
         }

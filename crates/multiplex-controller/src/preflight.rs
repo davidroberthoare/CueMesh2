@@ -206,6 +206,7 @@ mod tests {
             loops: false,
             on_end: multiplex_shared::show::EndAction::default(),
             notes: None,
+            ..Default::default()
         }
     }
 

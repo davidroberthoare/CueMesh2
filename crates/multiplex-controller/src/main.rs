@@ -7,7 +7,7 @@
 
 use std::net::SocketAddr;
 
-use multiplex_controller::{discovery, server, state, sync, ui, update};
+use multiplex_controller::{discovery, known_clients, server, state, sync, ui, update};
 use multiplex_shared::protocol::DEFAULT_PORT;
 
 fn main() -> anyhow::Result<()> {
@@ -27,6 +27,14 @@ fn main() -> anyhow::Result<()> {
     // Pick up any client-update bundle sitting next to the binary (placed by
     // a previous self-update, or by hand from a USB stick).
     update::load_local_manifest(&state);
+    // Load the durable id→name directory (offline clients included) so the
+    // cue editor's client picker has something to show even before anyone
+    // reconnects this session.
+    {
+        let mut s = state.lock().unwrap();
+        s.known_clients_path = known_clients::default_path();
+        s.known_clients = known_clients::load(&s.known_clients_path);
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

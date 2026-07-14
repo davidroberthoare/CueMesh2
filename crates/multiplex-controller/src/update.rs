@@ -460,6 +460,10 @@ mod tests {
             preflight: Default::default(),
             push_progress: None,
             outbound: tx,
+            active_layer: None,
+            standby: None,
+            idle_free_utc_ms: 0,
+            now_playing: None,
         }
     }
 
